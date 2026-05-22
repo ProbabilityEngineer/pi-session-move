@@ -4,11 +4,21 @@
   "private": false,
   "description": "Pi extension that relocates the current session JSONL to another working directory without invoking the LLM.",
   "type": "module",
-  "keywords": ["pi-package", "pi-extension", "relocate", "session"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "relocate",
+    "session"
+  ],
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.75.3"
   },
   "pi": {
-    "extensions": ["index.ts"]
+    "extensions": [
+      "index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1"
   }
 }

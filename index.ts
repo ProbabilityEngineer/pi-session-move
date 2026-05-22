@@ -20,10 +20,12 @@ function defaultAgentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? ".", ".pi", "agent");
 }
 
-function uniqueRelocatedName(originalFile: string, targetCwd: string): string {
+function uniqueRelocatedName(originalFile: string): string {
 	const parsed = basename(originalFile).replace(/\.jsonl$/i, "");
+	const originalSessionId = parsed.split("_relocated_")[0] || "session";
+	const safeSessionId = originalSessionId.slice(0, 96);
 	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-	return `${parsed}_relocated_${sessionBucketName(targetCwd).replace(/^--|--$/g, "")}_${stamp}.jsonl`;
+	return `${safeSessionId}_relocated_${stamp}.jsonl`;
 }
 
 function replaceAllLiteral(input: string, from: string, to: string): string {
@@ -113,10 +115,7 @@ export default function (pi: ExtensionAPI) {
 			const destinationDir = join(agentDir, "sessions", sessionBucketName(targetCwd));
 			await mkdir(destinationDir, { recursive: true });
 
-			const destinationFile = join(
-				destinationDir,
-				uniqueRelocatedName(sessionFile, targetCwd),
-			);
+			const destinationFile = join(destinationDir, uniqueRelocatedName(sessionFile));
 			await writeFile(destinationFile, relocated, { encoding: "utf8", flag: "wx" });
 
 			const command = `cd ${shellQuote(targetCwd)} && pi --session ${shellQuote(destinationFile)}`;
