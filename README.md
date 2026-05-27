@@ -38,13 +38,20 @@ The command will:
 2. confirm the relocation,
 3. copy the current session file into the target cwd's Pi session bucket,
 4. replace occurrences of the old absolute cwd with the new absolute cwd,
-5. append a lineage record to `~/.pi/agent/relocations.jsonl`, and
-6. print the restart command.
+5. append a lineage record to `~/.pi/agent/relocations.jsonl`,
+6. write short restart scripts under `~/.pi/agent/relocations/`, and
+7. print a short restart command.
 
 Restart with the printed command, which looks like:
 
 ```bash
-cd /path/to/new/repo && pi --session /path/to/relocated.jsonl
+bash ~/.pi/agent/relocations/latest.sh
+```
+
+The extension also writes a timestamped script for each relocation:
+
+```text
+~/.pi/agent/relocations/run-<timestamp>.sh
 ```
 
 Use `--force` to skip confirmation:

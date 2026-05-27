@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 function shellQuote(value: string): string {
@@ -48,6 +48,33 @@ async function appendManifest(record: RelocationRecord): Promise<void> {
 	const path = manifestFile();
 	await mkdir(dirname(path), { recursive: true });
 	await writeFile(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", flag: "a" });
+}
+
+function relocationScriptsDir(): string {
+	return join(defaultAgentDir(), "relocations");
+}
+
+function scriptStamp(): string {
+	return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+async function writeRestartScripts(targetCwd: string, sessionFile: string): Promise<{ scriptFile: string; latestFile: string }> {
+	const dir = relocationScriptsDir();
+	await mkdir(dir, { recursive: true });
+	const content = [
+		"#!/usr/bin/env bash",
+		"set -euo pipefail",
+		`cd ${shellQuote(targetCwd)}`,
+		`exec pi --session ${shellQuote(sessionFile)}`,
+		"",
+	].join("\n");
+	const scriptFile = join(dir, `run-${scriptStamp()}.sh`);
+	const latestFile = join(dir, "latest.sh");
+	await writeFile(scriptFile, content, { encoding: "utf8", flag: "wx" });
+	await chmod(scriptFile, 0o755);
+	await writeFile(latestFile, content, { encoding: "utf8" });
+	await chmod(latestFile, 0o755);
+	return { scriptFile, latestFile };
 }
 
 async function readManifest(): Promise<RelocationRecord[]> {
@@ -232,6 +259,7 @@ export default function (pi: ExtensionAPI) {
 
 			const destinationFile = join(destinationDir, uniqueRelocatedName(sessionFile));
 			await writeFile(destinationFile, relocated, { encoding: "utf8", flag: "wx" });
+			const restart = await writeRestartScripts(targetCwd, destinationFile);
 			await appendManifest({
 				ts: new Date().toISOString(),
 				fromCwd: oldCwd,
@@ -242,11 +270,14 @@ export default function (pi: ExtensionAPI) {
 				replacements,
 			});
 
-			const command = `cd ${shellQuote(targetCwd)} && pi --session ${shellQuote(destinationFile)}`;
+			const command = `bash ${shellQuote(restart.latestFile)}`;
 			ctx.ui.notify(
 				[
 					`Relocated session written with ${replacements} direct path replacement${replacements === 1 ? "" : "s"}:`,
 					destinationFile,
+					"",
+					"Restart script:",
+					restart.scriptFile,
 					"",
 					"Restart Pi with:",
 					command,
