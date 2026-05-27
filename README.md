@@ -54,6 +54,8 @@ The extension also writes a timestamped script for each relocation:
 ~/.pi/agent/relocations/run-<timestamp>.sh
 ```
 
+Restart scripts intentionally use `pi --session <exact-file>` rather than `pi --session-id <id>`. Pi 0.76 adds `--session-id` for exact project-local automation, and `pi-relocate` records session IDs for lineage, but copied relocated files still use the verified exact-file path until ID-to-file behavior is validated for this workflow.
+
 Use `--force` to skip confirmation:
 
 ```text
@@ -68,7 +70,7 @@ Use `--force` to skip confirmation:
 ~/.pi/agent/relocations.jsonl
 ```
 
-Each record includes the timestamp, source cwd, target cwd, source session file, destination session file, parent session, and replacement count.
+Each record includes the timestamp, source cwd, target cwd, source session file, destination session file, parent session, replacement count, and Pi session ID when available.
 
 Use `/relocate-status` for a compact overview: current session tracking, latest relocations, fork count, and unrecorded relocated file count. Use `/relocate-status --all` for full recorded and discovered details.
 

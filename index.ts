@@ -40,6 +40,8 @@ type RelocationRecord = {
 	destinationSession: string;
 	parent: string;
 	replacements: number | null;
+	sourceSessionId?: string;
+	destinationSessionId?: string;
 	inferred?: boolean;
 	confidence?: string;
 };
@@ -58,12 +60,14 @@ function scriptStamp(): string {
 	return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-async function writeRestartScripts(targetCwd: string, sessionFile: string): Promise<{ scriptFile: string; latestFile: string }> {
+async function writeRestartScripts(targetCwd: string, sessionFile: string, sessionId?: string): Promise<{ scriptFile: string; latestFile: string }> {
 	const dir = relocationScriptsDir();
 	await mkdir(dir, { recursive: true });
 	const content = [
 		"#!/usr/bin/env bash",
 		"set -euo pipefail",
+		...(sessionId ? [`# Pi session id: ${sessionId}`] : []),
+		"# Use --session with the exact relocated file. Do not switch to --session-id until Pi's ID-to-file mapping is verified for copied sessions.",
 		`cd ${shellQuote(targetCwd)}`,
 		`exec pi --session ${shellQuote(sessionFile)}`,
 		"",
@@ -190,6 +194,7 @@ function formatHop(record: RelocationRecord, index: number, currentSession?: str
 		`   ${record.ts}`,
 	];
 	if (files) {
+		if (record.sourceSessionId || record.destinationSessionId) lines.push(`   session id: ${record.destinationSessionId ?? record.sourceSessionId}`);
 		lines.push(`   source: ${shortPath(record.sourceSession)}`);
 		lines.push(`   dest:   ${shortPath(record.destinationSession)}`);
 	}
@@ -208,6 +213,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const sessionFile = ctx.sessionManager.getSessionFile();
+			const sessionId = ctx.sessionManager.getSessionId();
 			if (!sessionFile) {
 				ctx.ui.notify("Cannot relocate an ephemeral session with no session file.", "error");
 				return;
@@ -259,7 +265,7 @@ export default function (pi: ExtensionAPI) {
 
 			const destinationFile = join(destinationDir, uniqueRelocatedName(sessionFile));
 			await writeFile(destinationFile, relocated, { encoding: "utf8", flag: "wx" });
-			const restart = await writeRestartScripts(targetCwd, destinationFile);
+			const restart = await writeRestartScripts(targetCwd, destinationFile, sessionId);
 			await appendManifest({
 				ts: new Date().toISOString(),
 				fromCwd: oldCwd,
@@ -268,6 +274,8 @@ export default function (pi: ExtensionAPI) {
 				destinationSession: destinationFile,
 				parent: sessionFile,
 				replacements,
+				sourceSessionId: sessionId,
+				destinationSessionId: sessionId,
 			});
 
 			const command = `bash ${shellQuote(restart.latestFile)}`;
@@ -299,11 +307,13 @@ export default function (pi: ExtensionAPI) {
 			const currentLineage = buildLineage(records, currentIndex);
 			const forks = forkRecords(records, currentLineage);
 			const unrecorded = discovered.filter((path) => !byDestination.has(path));
+			const currentSessionId = ctx.sessionManager.getSessionId();
 			const lines = [
 				"Relocation status",
 				"",
 				`Current cwd: ${shortPath(ctx.cwd)}`,
 				`Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
+				`Current session id: ${currentSessionId}`,
 				`Current session tracked: ${currentIndex >= 0 ? `yes (#${currentIndex + 1})` : "no"}`,
 				`Manifest records: ${records.length}`,
 				`Current lineage hops: ${currentLineage.length}`,
@@ -357,6 +367,7 @@ export default function (pi: ExtensionAPI) {
 				"",
 				`Current cwd: ${shortPath(ctx.cwd)}`,
 				`Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
+				`Current session id: ${ctx.sessionManager.getSessionId()}`,
 			];
 
 			if (!sessionFile) lines.push("", "Current session is ephemeral; no lineage is available.");
