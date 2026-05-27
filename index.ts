@@ -86,9 +86,9 @@ function replaceAllLiteral(input: string, from: string, to: string): string {
 	return input.split(from).join(to);
 }
 
-function parseArgs(args: string): { target?: string; force: boolean } {
+function parseWords(args: string): string[] {
 	const parts = args.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-	const values = parts.map((part) => {
+	return parts.map((part) => {
 		if (
 			(part.startsWith('"') && part.endsWith('"')) ||
 			(part.startsWith("'") && part.endsWith("'"))
@@ -97,15 +97,76 @@ function parseArgs(args: string): { target?: string; force: boolean } {
 		}
 		return part;
 	});
+}
 
+function parseArgs(args: string): { target?: string; force: boolean } {
 	let force = false;
 	const positional: string[] = [];
-	for (const value of values) {
+	for (const value of parseWords(args)) {
 		if (value === "--force" || value === "-f") force = true;
 		else positional.push(value);
 	}
 
 	return { target: positional.join(" ") || undefined, force };
+}
+
+function hasFlag(args: string, flag: string): boolean {
+	return parseWords(args).includes(flag);
+}
+
+function shortPath(path: string): string {
+	if (!path || path.startsWith("(")) return path;
+	const home = process.env.HOME;
+	return home && path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
+}
+
+function cwdLabel(cwd: string): string {
+	if (!cwd || cwd.startsWith("(")) return cwd;
+	return basename(cwd) || cwd;
+}
+
+function recordMarker(record: RelocationRecord): string {
+	return record.inferred ? "inferred" : "explicit";
+}
+
+function findCurrentIndex(records: RelocationRecord[], sessionFile?: string): number {
+	if (!sessionFile) return -1;
+	return records.findIndex((record) => record.destinationSession === sessionFile);
+}
+
+function buildLineage(records: RelocationRecord[], currentIndex: number): RelocationRecord[] {
+	if (currentIndex < 0) return [];
+	const byDestination = new Map(records.map((record) => [record.destinationSession, record]));
+	const lineage: RelocationRecord[] = [];
+	const seen = new Set<string>();
+	let current: RelocationRecord | undefined = records[currentIndex];
+	while (current && !seen.has(current.destinationSession)) {
+		lineage.unshift(current);
+		seen.add(current.destinationSession);
+		current = byDestination.get(current.sourceSession) ?? byDestination.get(current.parent);
+	}
+	return lineage;
+}
+
+function forkRecords(records: RelocationRecord[], lineage: RelocationRecord[]): RelocationRecord[] {
+	const chainSources = new Set(lineage.map((record) => record.sourceSession));
+	const chainDestinations = new Set(lineage.map((record) => record.destinationSession));
+	return records.filter(
+		(record) => chainSources.has(record.sourceSession) && !chainDestinations.has(record.destinationSession),
+	);
+}
+
+function formatHop(record: RelocationRecord, index: number, currentSession?: string, files = false): string[] {
+	const current = record.destinationSession === currentSession ? " current" : "";
+	const lines = [
+		`${index}. [${recordMarker(record)}] ${cwdLabel(record.fromCwd)} -> ${cwdLabel(record.toCwd)}${current}`,
+		`   ${record.ts}`,
+	];
+	if (files) {
+		lines.push(`   source: ${shortPath(record.sourceSession)}`);
+		lines.push(`   dest:   ${shortPath(record.destinationSession)}`);
+	}
+	return lines;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -196,39 +257,88 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("relocate-status", {
-		description: "Show recorded relocation lineage and discovered relocated session files.",
-		handler: async (_args, ctx) => {
+		description: "Show compact relocation status. Use --all for full details.",
+		handler: async (args, ctx) => {
+			const showAll = hasFlag(args, "--all");
 			const sessionFile = ctx.sessionManager.getSessionFile();
 			const records = await readManifest();
 			const discovered = await findRelocatedSessions();
 			const byDestination = new Map(records.map((record) => [record.destinationSession, record]));
-			const currentIndex = sessionFile ? records.findIndex((record) => record.destinationSession === sessionFile) : -1;
+			const currentIndex = findCurrentIndex(records, sessionFile);
+			const currentLineage = buildLineage(records, currentIndex);
+			const forks = forkRecords(records, currentLineage);
+			const unrecorded = discovered.filter((path) => !byDestination.has(path));
 			const lines = [
 				"Relocation status",
 				"",
-				`Current cwd: ${ctx.cwd}`,
-				`Current session: ${sessionFile ?? "(ephemeral)"}`,
-				`Manifest: ${manifestFile()}`,
-				`Recorded relocations: ${records.length}`,
-				`Discovered relocated sessions: ${discovered.length}`,
+				`Current cwd: ${shortPath(ctx.cwd)}`,
+				`Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
+				`Current session tracked: ${currentIndex >= 0 ? `yes (#${currentIndex + 1})` : "no"}`,
+				`Manifest records: ${records.length}`,
+				`Current lineage hops: ${currentLineage.length}`,
+				`Forks from current lineage: ${forks.length}`,
+				`Unrecorded relocated files: ${unrecorded.length}`,
 			];
 
-			if (currentIndex >= 0) lines.push(`Current session is recorded relocation #${currentIndex + 1}.`);
-			else if (sessionFile) lines.push("Current session is not recorded as a relocation destination.");
-
-			lines.push("", "Recent recorded relocations:");
-			for (const [index, record] of records.slice(-10).entries()) {
-				const n = records.length - Math.min(10, records.length) + index + 1;
-				lines.push(`${n}. ${record.ts}`);
-				lines.push(`   ${record.fromCwd} -> ${record.toCwd}`);
-				lines.push(`   dest: ${record.destinationSession}`);
+			lines.push("", "Latest relocations:");
+			const recent = records.slice(-5);
+			if (recent.length) {
+				for (const [offset, record] of recent.entries()) {
+					const n = records.length - recent.length + offset + 1;
+					lines.push(...formatHop(record, n, sessionFile, false));
+				}
+			} else {
+				lines.push("(none)");
 			}
-			if (records.length === 0) lines.push("(none)");
 
-			const unrecorded = discovered.filter((path) => !byDestination.has(path));
-			if (unrecorded.length) {
-				lines.push("", "Discovered relocated sessions not in manifest:");
-				for (const path of unrecorded.slice(-20)) lines.push(`- ${path}`);
+			if (forks.length) {
+				lines.push("", "Forks touching current lineage:");
+				for (const [index, record] of forks.slice(-5).entries()) lines.push(...formatHop(record, index + 1, sessionFile, false));
+			}
+
+			if (showAll) {
+				lines.push("", "All recorded relocations:");
+				for (const [index, record] of records.entries()) lines.push(...formatHop(record, index + 1, sessionFile, true));
+
+				if (unrecorded.length) {
+					lines.push("", "Discovered relocated sessions not in manifest:");
+					for (const path of unrecorded) lines.push(`- ${shortPath(path)}`);
+				}
+			} else {
+				lines.push("", "Use /relocate-lineage for the current chain; /relocate-status --all for full details.");
+			}
+
+			ctx.ui.notify(lines.join("\n"), "info");
+		},
+	});
+
+	pi.registerCommand("relocate-lineage", {
+		description: "Show the current relocation ancestry chain. Use --files to include session paths.",
+		handler: async (args, ctx) => {
+			const showFiles = hasFlag(args, "--files");
+			const sessionFile = ctx.sessionManager.getSessionFile();
+			const records = await readManifest();
+			const currentIndex = findCurrentIndex(records, sessionFile);
+			const lineage = buildLineage(records, currentIndex);
+			const forks = forkRecords(records, lineage);
+			const lines = [
+				"Relocation lineage",
+				"",
+				`Current cwd: ${shortPath(ctx.cwd)}`,
+				`Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
+			];
+
+			if (!sessionFile) lines.push("", "Current session is ephemeral; no lineage is available.");
+			else if (currentIndex < 0) lines.push("", "Current session is not recorded as a relocation destination.");
+			else if (!lineage.length) lines.push("", "No lineage records found for current session.");
+			else {
+				lines.push("", "Current chain:");
+				for (const [index, record] of lineage.entries()) lines.push(...formatHop(record, index + 1, sessionFile, showFiles));
+			}
+
+			if (forks.length) {
+				lines.push("", "Forks from this chain:");
+				for (const [index, record] of forks.entries()) lines.push(...formatHop(record, index + 1, sessionFile, showFiles));
 			}
 
 			ctx.ui.notify(lines.join("\n"), "info");

@@ -22,7 +22,8 @@ Inside Pi:
 
 ```text
 /relocate <target-directory>
-/relocate-status
+/relocate-status [--all]
+/relocate-lineage [--files]
 ```
 
 Example:
@@ -62,7 +63,9 @@ Use `--force` to skip confirmation:
 
 Each record includes the timestamp, source cwd, target cwd, source session file, destination session file, parent session, and replacement count.
 
-Use `/relocate-status` to show the current session, recent recorded relocations, and relocated session files discovered under `~/.pi/agent/sessions` that are not yet in the manifest.
+Use `/relocate-status` for a compact overview: current session tracking, latest relocations, fork count, and unrecorded relocated file count. Use `/relocate-status --all` for full recorded and discovered details.
+
+Use `/relocate-lineage` to show only the current session's ancestry chain. Use `/relocate-lineage --files` to include source and destination session paths. Output marks old reconstructed records as `inferred` and new manifest records as `explicit`.
 
 ## Notes
 
