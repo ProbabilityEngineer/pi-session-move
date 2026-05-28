@@ -74,7 +74,13 @@ Each record includes the timestamp, source cwd, target cwd, source session file,
 
 Use `/relocate-status` for a compact overview: current session tracking, latest relocations, fork count, and unrecorded relocated file count. Use `/relocate-status --all` for full recorded and discovered details.
 
-Use `/relocate-lineage` to show only the current session's ancestry chain. Use `/relocate-lineage --files` to include source and destination session paths. Output marks old reconstructed records as `inferred` and new manifest records as `explicit`.
+Use `/relocate-lineage` to show the current session's ancestry chain plus whether the current session has known descendants, whether it is a latest leaf, and the newest/longest descendant leaf when available. Use `/relocate-lineage --files` to include source and destination session paths. Output marks old reconstructed records as `inferred` and new manifest records as `explicit`.
+
+Agents can use the compact read-only tool:
+
+```text
+relocate action: status/lineage
+```
 
 ## Notes
 

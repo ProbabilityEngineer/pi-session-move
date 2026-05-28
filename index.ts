@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -187,6 +188,79 @@ function forkRecords(records: RelocationRecord[], lineage: RelocationRecord[]): 
 	);
 }
 
+function childRecords(records: RelocationRecord[], sessionFile?: string): RelocationRecord[] {
+	if (!sessionFile) return [];
+	return records.filter((record) => record.sourceSession === sessionFile || record.parent === sessionFile);
+}
+
+function descendantRecords(records: RelocationRecord[], sessionFile?: string): RelocationRecord[] {
+	if (!sessionFile) return [];
+	const descendants: RelocationRecord[] = [];
+	const queue = [sessionFile];
+	const seen = new Set<string>();
+	while (queue.length) {
+		const current = queue.shift();
+		if (!current || seen.has(current)) continue;
+		seen.add(current);
+		for (const child of childRecords(records, current)) {
+			descendants.push(child);
+			queue.push(child.destinationSession);
+		}
+	}
+	return descendants;
+}
+
+function leafRecords(records: RelocationRecord[], candidates: RelocationRecord[]): RelocationRecord[] {
+	return candidates.filter((record) => !childRecords(records, record.destinationSession).length);
+}
+
+function newestRecord(records: RelocationRecord[]): RelocationRecord | undefined {
+	return [...records].sort((a, b) => a.ts.localeCompare(b.ts)).at(-1);
+}
+
+function lineageLength(records: RelocationRecord[], record: RelocationRecord): number {
+	return buildLineage(records, records.indexOf(record)).length;
+}
+
+function longestLineageLeaf(records: RelocationRecord[], leaves: RelocationRecord[]): RelocationRecord | undefined {
+	return [...leaves].sort((a, b) => lineageLength(records, a) - lineageLength(records, b) || a.ts.localeCompare(b.ts)).at(-1);
+}
+
+function restartCommand(): string {
+	return `bash ${shellQuote(join(relocationScriptsDir(), "latest.sh"))}`;
+}
+
+function formatLeaf(label: string, record: RelocationRecord | undefined, files = false): string[] {
+	if (!record) return [`${label}: none`];
+	const lines = [`${label}: ${cwdLabel(record.toCwd)} @ ${record.ts}`];
+	if (record.destinationSessionId) lines.push(`  session id: ${record.destinationSessionId}`);
+	if (files) lines.push(`  session: ${shortPath(record.destinationSession)}`);
+	return lines;
+}
+
+function lineageSummary(records: RelocationRecord[], sessionFile?: string): string[] {
+	const currentIndex = findCurrentIndex(records, sessionFile);
+	const lineage = buildLineage(records, currentIndex);
+	const descendants = descendantRecords(records, sessionFile);
+	const leaves = leafRecords(records, descendants);
+	const currentChildren = childRecords(records, sessionFile);
+	const forks = forkRecords(records, lineage);
+	const isLatestLeaf = Boolean(sessionFile && currentIndex >= 0 && !currentChildren.length);
+	const newestLeaf = newestRecord(leaves);
+	const longestLeaf = longestLineageLeaf(records, leaves);
+	return [
+		`Current session tracked: ${currentIndex >= 0 ? "yes" : "no"}`,
+		`Current session is latest leaf: ${isLatestLeaf ? "yes" : "no"}`,
+		`Children from current session: ${currentChildren.length}`,
+		`Descendants from current session: ${descendants.length}`,
+		`Descendant leaves: ${leaves.length}`,
+		`Forks from current chain: ${forks.length}`,
+		...formatLeaf("Newest descendant leaf", newestLeaf),
+		...formatLeaf("Longest-lineage descendant leaf", longestLeaf),
+		...(descendants.length ? [`Restart latest script: ${restartCommand()}`] : []),
+	];
+}
+
 function formatHop(record: RelocationRecord, index: number, currentSession?: string, files = false): string[] {
 	const current = record.destinationSession === currentSession ? " current" : "";
 	const lines = [
@@ -201,7 +275,85 @@ function formatHop(record: RelocationRecord, index: number, currentSession?: str
 	return lines;
 }
 
+async function buildStatusOutput(ctx: any, showAll = false): Promise<string> {
+	const sessionFile = ctx.sessionManager?.getSessionFile?.();
+	const records = await readManifest();
+	const discovered = await findRelocatedSessions();
+	const byDestination = new Map(records.map((record) => [record.destinationSession, record]));
+	const currentIndex = findCurrentIndex(records, sessionFile);
+	const currentLineage = buildLineage(records, currentIndex);
+	const forks = forkRecords(records, currentLineage);
+	const unrecorded = discovered.filter((path) => !byDestination.has(path));
+	const lines = [
+		"Relocation status",
+		"",
+		`Current cwd: ${shortPath(ctx.cwd ?? "")}`,
+		`Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
+		`Current session id: ${ctx.sessionManager?.getSessionId?.() ?? "unknown"}`,
+		`Current session tracked: ${currentIndex >= 0 ? `yes (#${currentIndex + 1})` : "no"}`,
+		`Manifest records: ${records.length}`,
+		`Current lineage hops: ${currentLineage.length}`,
+		`Forks from current lineage: ${forks.length}`,
+		`Unrecorded relocated files: ${unrecorded.length}`,
+	];
+	if (showAll) {
+		lines.push("", "All recorded relocations:");
+		for (const [index, record] of records.entries()) lines.push(...formatHop(record, index + 1, sessionFile, true));
+	}
+	return lines.join("\n");
+}
+
+async function buildLineageOutput(ctx: any, showFiles = false): Promise<string> {
+	const sessionFile = ctx.sessionManager?.getSessionFile?.();
+	const records = await readManifest();
+	const currentIndex = findCurrentIndex(records, sessionFile);
+	const lineage = buildLineage(records, currentIndex);
+	const forks = forkRecords(records, lineage);
+	const lines = [
+		"Relocation lineage",
+		"",
+		`Current cwd: ${shortPath(ctx.cwd ?? "")}`,
+		`Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
+		`Current session id: ${ctx.sessionManager?.getSessionId?.() ?? "unknown"}`,
+		"",
+		"Current position:",
+		...lineageSummary(records, sessionFile),
+	];
+	if (!sessionFile) lines.push("", "Current session is ephemeral; no lineage is available.");
+	else if (currentIndex < 0) lines.push("", "Current session is not recorded as a relocation destination.");
+	else if (!lineage.length) lines.push("", "No lineage records found for current session.");
+	else {
+		lines.push("", "Current chain:");
+		for (const [index, record] of lineage.entries()) lines.push(...formatHop(record, index + 1, sessionFile, showFiles));
+	}
+	if (forks.length) {
+		lines.push("", "Forks from this chain:");
+		for (const [index, record] of forks.entries()) lines.push(...formatHop(record, index + 1, sessionFile, showFiles));
+	}
+	return lines.join("\n");
+}
+
 export default function (pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "relocate",
+		label: "Relocate",
+		description: "Pi session relocation status and lineage: status/lineage.",
+		promptSnippet: "Relocate routing: use relocate status/lineage when checking whether the current Pi session is an older relocated branch or latest lineage leaf.",
+		promptGuidelines: [
+			"Use relocate lineage to answer whether the current session has descendants, is a latest leaf, or should continue from a newer relocated session.",
+			"Relocate status/lineage are read-only; use slash /relocate for the user-confirmed copy operation.",
+		],
+		parameters: Type.Object({
+			action: Type.Union([Type.Literal("status"), Type.Literal("lineage")]),
+			all: Type.Optional(Type.Boolean({ description: "For status, include all manifest records." })),
+			files: Type.Optional(Type.Boolean({ description: "For lineage, include source and destination session paths." })),
+		}),
+		async execute(_toolCallId: string, params: { action: "status" | "lineage"; all?: boolean; files?: boolean }, _signal: AbortSignal, _updates: unknown, ctx: any) {
+			const text = params.action === "status" ? await buildStatusOutput(ctx, Boolean(params.all)) : await buildLineageOutput(ctx, Boolean(params.files));
+			return { content: [{ type: "text" as const, text }], details: { action: params.action } };
+		},
+	} as any);
+
 	pi.registerCommand("relocate", {
 		description:
 			"Copy this session to another cwd by replacing old path strings; restart Pi there with --session. Records lineage in relocations.jsonl. No LLM call.",
@@ -368,6 +520,9 @@ export default function (pi: ExtensionAPI) {
 				`Current cwd: ${shortPath(ctx.cwd)}`,
 				`Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
 				`Current session id: ${ctx.sessionManager.getSessionId()}`,
+				"",
+				"Current position:",
+				...lineageSummary(records, sessionFile),
 			];
 
 			if (!sessionFile) lines.push("", "Current session is ephemeral; no lineage is available.");

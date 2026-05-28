@@ -11,7 +11,8 @@
     "session"
   ],
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.75.3"
+    "@earendil-works/pi-coding-agent": "^0.75.3",
+    "typebox": "latest"
   },
   "pi": {
     "extensions": [
