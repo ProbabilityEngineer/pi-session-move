@@ -158,7 +158,8 @@ function storeFile(): string {
 	return join(defaultAgentDir(), "session-store", "session-store.sqlite");
 }
 
-type ObservationMark = { markType: string; reason?: string; replacementObservationId?: string; replacementPath?: string; timestamp: string; confidence: string; manualReviewRequired: boolean };
+type ObservationMark = { markType: string; reason?: string; replacementObservationId?: string; replacementPath?: string; observationPath?: string; timestamp: string; confidence: string; manualReviewRequired: boolean };
+type ThreadResumeTarget = { threadId: string; status: string; recommendedSessionId?: string; recommendedObservationId?: string; recommendedPath?: string; activeLeafPaths: string[]; recoverablePaths: string[]; reasons: string[] };
 
 function currentSessionMarks(sessionFile?: string): ObservationMark[] {
 	if (!sessionFile) return [];
@@ -167,13 +168,13 @@ function currentSessionMarks(sessionFile?: string): ObservationMark[] {
 		try {
 			initStore(db);
 			const rows = db.prepare(`
-SELECT m.mark_type AS markType, m.reason AS reason, m.replacement_observation_id AS replacementObservationId, r.path AS replacementPath, m.timestamp AS timestamp, m.confidence AS confidence, m.manual_review_required AS manualReviewRequired
+SELECT m.mark_type AS markType, m.reason AS reason, m.replacement_observation_id AS replacementObservationId, o.path AS observationPath, r.path AS replacementPath, m.timestamp AS timestamp, m.confidence AS confidence, m.manual_review_required AS manualReviewRequired
 FROM observation_marks m
 JOIN session_observations o ON o.id = m.observation_id
 LEFT JOIN session_observations r ON r.id = m.replacement_observation_id
 WHERE o.path = ?
 ORDER BY m.timestamp DESC, m.mark_type
-`).all(sessionFile) as { markType: string; reason?: string; replacementObservationId?: string; replacementPath?: string; timestamp: string; confidence: string; manualReviewRequired: number }[];
+`).all(sessionFile) as { markType: string; reason?: string; replacementObservationId?: string; observationPath?: string; replacementPath?: string; timestamp: string; confidence: string; manualReviewRequired: number }[];
 			return rows.map((row) => ({ ...row, manualReviewRequired: Boolean(row.manualReviewRequired) }));
 		} finally {
 			db.close();
@@ -181,6 +182,70 @@ ORDER BY m.timestamp DESC, m.mark_type
 	} catch {
 		return [];
 	}
+}
+
+function allAvailabilityMarks(): ObservationMark[] {
+	try {
+		const db = new DatabaseSync(storeFile(), { readOnly: true });
+		try {
+			initStore(db);
+			const rows = db.prepare(`
+SELECT m.mark_type AS markType, m.reason AS reason, m.replacement_observation_id AS replacementObservationId, o.path AS observationPath, r.path AS replacementPath, m.timestamp AS timestamp, m.confidence AS confidence, m.manual_review_required AS manualReviewRequired
+FROM observation_marks m
+JOIN session_observations o ON o.id = m.observation_id
+LEFT JOIN session_observations r ON r.id = m.replacement_observation_id
+ORDER BY m.timestamp DESC, m.mark_type
+`).all() as { markType: string; reason?: string; replacementObservationId?: string; observationPath?: string; replacementPath?: string; timestamp: string; confidence: string; manualReviewRequired: number }[];
+			return rows.map((row) => ({ ...row, manualReviewRequired: Boolean(row.manualReviewRequired) }));
+		} finally {
+			db.close();
+		}
+	} catch {
+		return [];
+	}
+}
+
+function unavailableSessionSet(): Set<string> {
+	return new Set(allAvailabilityMarks().filter((mark) => mark.markType === "superseded" || mark.markType === "deletion_candidate").map((mark) => mark.observationPath).filter((path): path is string => Boolean(path)));
+}
+
+function threadResumeTargetsForSession(sessionFile?: string): ThreadResumeTarget[] {
+	if (!sessionFile) return [];
+	try {
+		const db = new DatabaseSync(storeFile(), { readOnly: true });
+		try {
+			const rows = db.prepare(`
+SELECT tr.thread_id AS threadId, tr.status AS status, tr.recommended_session_id AS recommendedSessionId, tr.recommended_observation_id AS recommendedObservationId,
+       ro.path AS recommendedPath, tr.active_leaf_session_ids_json AS activeLeafSessionIdsJson, tr.recoverable_session_ids_json AS recoverableSessionIdsJson, tr.reasons_json AS reasonsJson
+FROM thread_resume_targets tr
+JOIN thread_members tm ON tm.thread_id = tr.thread_id
+JOIN sessions s ON s.id = tm.session_id
+LEFT JOIN session_observations ro ON ro.id = tr.recommended_observation_id
+WHERE s.canonical_key = ?
+ORDER BY tr.thread_id
+`).all(sessionFile) as { threadId: string; status: string; recommendedSessionId?: string; recommendedObservationId?: string; recommendedPath?: string; activeLeafSessionIdsJson: string; recoverableSessionIdsJson: string; reasonsJson: string }[];
+			const pathForSession = db.prepare("SELECT canonical_key AS path FROM sessions WHERE id = ?");
+			const toPaths = (raw: string) => {
+				try { return (JSON.parse(raw) as string[]).flatMap((id) => (pathForSession.get(id) as { path?: string } | undefined)?.path ? [(pathForSession.get(id) as { path: string }).path] : []); } catch { return []; }
+			};
+			return rows.map((row) => ({ threadId: row.threadId, status: row.status, recommendedSessionId: row.recommendedSessionId, recommendedObservationId: row.recommendedObservationId, recommendedPath: row.recommendedPath, activeLeafPaths: toPaths(row.activeLeafSessionIdsJson), recoverablePaths: toPaths(row.recoverableSessionIdsJson), reasons: JSON.parse(row.reasonsJson) as string[] }));
+		} finally { db.close(); }
+	} catch { return []; }
+}
+
+function threadResumeLines(sessionFile?: string): string[] {
+	const targets = threadResumeTargetsForSession(sessionFile);
+	if (!targets.length) return [];
+	return [
+		"",
+		"Logical thread resume:",
+		...targets.flatMap((target) => [
+			`- ${target.status}${target.recommendedPath ? `: ${shortPath(target.recommendedPath)}` : ""}`,
+			...(target.status === "branch-choices" ? target.activeLeafPaths.map((path) => `  branch: ${shortPath(path)}`) : []),
+			...(target.status === "recoverable-only" ? target.recoverablePaths.map((path) => `  recoverable: ${shortPath(path)}`) : []),
+			`  reasons: ${target.reasons.join(", ")}`,
+		]),
+	];
 }
 
 function movedWarningLines(sessionFile?: string): string[] {
@@ -382,8 +447,9 @@ function descendantRecords(records: RelocationRecord[], sessionFile?: string): R
 	return descendants;
 }
 
-function leafRecords(records: RelocationRecord[], candidates: RelocationRecord[]): RelocationRecord[] {
-	return candidates.filter((record) => !childRecords(records, record.destinationSession).length);
+function leafRecords(records: RelocationRecord[], candidates: RelocationRecord[], includeUnavailable = false): RelocationRecord[] {
+	const unavailable = includeUnavailable ? new Set<string>() : unavailableSessionSet();
+	return candidates.filter((record) => !childRecords(records, record.destinationSession).length && !unavailable.has(record.destinationSession));
 }
 
 function newestRecord(records: RelocationRecord[]): RelocationRecord | undefined {
@@ -415,6 +481,7 @@ function lineageSummary(records: RelocationRecord[], sessionFile?: string): stri
 	const lineage = buildLineage(records, currentIndex);
 	const descendants = descendantRecords(records, sessionFile);
 	const leaves = leafRecords(records, descendants);
+	const recoverableLeaves = leafRecords(records, descendants, true).filter((record) => unavailableSessionSet().has(record.destinationSession));
 	const currentChildren = childRecords(records, sessionFile);
 	const forks = forkRecords(records, lineage);
 	const isLatestLeaf = Boolean(sessionFile && currentIndex >= 0 && !currentChildren.length);
@@ -425,10 +492,13 @@ function lineageSummary(records: RelocationRecord[], sessionFile?: string): stri
 		`Current session is latest leaf: ${isLatestLeaf ? "yes" : "no"}`,
 		`Children from current session: ${currentChildren.length}`,
 		`Descendants from current session: ${descendants.length}`,
-		`Descendant leaves: ${leaves.length}`,
+		`Active descendant leaves: ${leaves.length}`,
+		`Recoverable moved/superseded leaves: ${recoverableLeaves.length}`,
 		`Forks from current chain: ${forks.length}`,
 		...formatLeaf("Newest descendant leaf", newestLeaf),
 		...formatLeaf("Longest-lineage descendant leaf", longestLeaf),
+		...(recoverableLeaves.length ? ["Recoverable leaves are hidden from normal resume suggestions; use --files/status details for raw paths."] : []),
+		...threadResumeLines(sessionFile),
 		...(descendants.length ? [`Restart latest script: ${restartCommand()}`] : []),
 	];
 }

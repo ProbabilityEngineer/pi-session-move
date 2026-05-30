@@ -1,6 +1,6 @@
 ---
 id: psg-resume-availability
-status: open
+status: closed
 deps: []
 links:
   - git:github.com/ProbabilityEngineer/agent-session-store

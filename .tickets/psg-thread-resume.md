@@ -1,6 +1,6 @@
 ---
 id: psg-thread-resume
-status: open
+status: closed
 deps: [psg-logical-threads]
 links:
   - git:github.com/ProbabilityEngineer/agent-session-store
