@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -56,6 +56,8 @@ type RelocationRecord = {
 	batchId?: string;
 	inferred?: boolean;
 	confidence?: string;
+	sourceLinesAtEvent?: number;
+	sourceBytesAtEvent?: number;
 };
 
 async function appendManifest(record: RelocationRecord): Promise<void> {
@@ -86,6 +88,14 @@ CREATE TABLE IF NOT EXISTS labels (id TEXT PRIMARY KEY, target_type TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS observation_marks (id TEXT PRIMARY KEY, observation_id TEXT NOT NULL, mark_type TEXT NOT NULL, reason TEXT, replacement_observation_id TEXT, source TEXT NOT NULL, timestamp TEXT NOT NULL, confidence TEXT NOT NULL, manual_review_required INTEGER NOT NULL DEFAULT 1, metadata_json TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS batch_operations (id TEXT PRIMARY KEY, operation_type TEXT NOT NULL, source_path TEXT NOT NULL, destination_path TEXT NOT NULL, timestamp TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}');
 `);
+}
+
+async function sessionLines(path: string): Promise<number | undefined> {
+	try {
+		return (await readFile(path, "utf8")).split("\n").filter((line) => line.trim()).length;
+	} catch {
+		return undefined;
+	}
 }
 
 async function sessionStats(path: string) {
@@ -122,7 +132,7 @@ async function appendStoreRecord(record: RelocationRecord, name?: string): Promi
 		upsertObs.run(sourceObsId, sourceSessionId, sourceId, record.sourceSession, record.sourceSessionId ?? null, record.ts, null, sourceStats.fileBirthtime, sourceStats.fileMtime, sourceStats.byteCount, sourceStats.lineCount, null, null, null, null, JSON.stringify({ cwd: record.fromCwd }));
 		upsertObs.run(destObsId, destSessionId, sourceId, record.destinationSession, record.destinationSessionId ?? null, record.ts, null, destStats.fileBirthtime, destStats.fileMtime, destStats.byteCount, destStats.lineCount, null, null, null, null, JSON.stringify({ cwd: record.toCwd }));
 		const edgeId = hashId("edge", record.ts, record.sourceSession, record.destinationSession);
-		upsertEdge.run(edgeId, sourceSessionId, destSessionId, record.mode === "branch" ? "branch" : "relocation", record.ts, sourceObsId, destObsId, "authoritative", "pi-relocate", JSON.stringify({ fromCwd: record.fromCwd, toCwd: record.toCwd, replacements: record.replacements, parent: record.parent, sourceSessionId: record.sourceSessionId, destinationSessionId: record.destinationSessionId, mode: record.mode ?? "move", batchId: record.batchId }));
+		upsertEdge.run(edgeId, sourceSessionId, destSessionId, record.mode === "branch" ? "branch" : "relocation", record.ts, sourceObsId, destObsId, "authoritative", "pi-relocate", JSON.stringify({ fromCwd: record.fromCwd, toCwd: record.toCwd, replacements: record.replacements, parent: record.parent, sourceSessionId: record.sourceSessionId, destinationSessionId: record.destinationSessionId, mode: record.mode ?? "move", batchId: record.batchId, sourceLinesAtEvent: record.sourceLinesAtEvent, sourceBytesAtEvent: record.sourceBytesAtEvent }));
 		if (record.batchId) upsertBatch.run(record.batchId, "bucket_relocation", record.fromCwd, record.toCwd, record.ts, "pi-relocate", "applied", JSON.stringify({ mode: record.mode ?? "move" }));
 		if ((record.mode ?? "move") === "move") {
 			upsertMark.run(hashId("mark", sourceObsId, "superseded", destObsId, record.ts), sourceObsId, "superseded", "relocated by pi-relocate move semantics", destObsId, "pi-relocate", record.ts, "authoritative", 1, JSON.stringify({ batchId: record.batchId }));
@@ -330,7 +340,7 @@ async function relocateSessionFile(sourceFile: string, oldCwd: string, targetCwd
 	const destinationFile = join(destinationDir, uniqueRelocatedName(sourceFile));
 	await writeFile(destinationFile, relocated, { encoding: "utf8", flag: "wx" });
 	const sessionId = basename(sourceFile).match(/_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_|\.|$)/)?.[1];
-	const record = { ts: new Date().toISOString(), fromCwd: oldCwd, toCwd: targetCwd, sourceSession: sourceFile, destinationSession: destinationFile, parent: sourceFile, replacements, sourceSessionId: sessionId, destinationSessionId: sessionId, mode, batchId } satisfies RelocationRecord;
+	const record = { ts: new Date().toISOString(), fromCwd: oldCwd, toCwd: targetCwd, sourceSession: sourceFile, destinationSession: destinationFile, parent: sourceFile, replacements, sourceSessionId: sessionId, destinationSessionId: sessionId, mode, batchId, sourceLinesAtEvent: original.split("\n").filter((line) => line.trim()).length, sourceBytesAtEvent: Buffer.byteLength(original) } satisfies RelocationRecord;
 	await appendManifest(record);
 	await appendStoreRecord(record, name);
 	return { record, replacements };
@@ -410,6 +420,20 @@ function parseArgs(args: string): { target?: string; force: boolean; branch: boo
 	}
 
 	return { target: positional.join(" ") || undefined, force, branch, dryRun };
+}
+
+function parseRepoArgs(args: string): { source?: string; target?: string; force: boolean; branch: boolean; dryRun: boolean } {
+	let force = false;
+	let branch = false;
+	let dryRun = false;
+	const positional: string[] = [];
+	for (const value of parseWords(args)) {
+		if (value === "--force" || value === "-f") force = true;
+		else if (value === "--branch" || value === "--copy") branch = true;
+		else if (value === "--dry-run" || value === "-n") dryRun = true;
+		else positional.push(value);
+	}
+	return { source: positional[0], target: positional[1], force, branch, dryRun };
 }
 
 function hasFlag(args: string, flag: string): boolean {
@@ -499,6 +523,34 @@ function longestLineageLeaf(records: RelocationRecord[], leaves: RelocationRecor
 
 function restartCommand(): string {
 	return `bash ${shellQuote(join(relocationScriptsDir(), "latest.sh"))}`;
+}
+
+async function ensureTargetDirectory(targetCwd: string, force: boolean, dryRun: boolean, confirm: (title: string, message: string) => Promise<boolean>): Promise<boolean> {
+	const targetStat = await stat(targetCwd).catch(() => undefined);
+	if (targetStat?.isDirectory()) return true;
+	if (targetStat) throw new Error(`Target exists but is not a directory: ${targetCwd}`);
+	if (dryRun) return true;
+	if (!force) {
+		const ok = await confirm("Create target directory?", `Target directory does not exist. Create it?\n\n${targetCwd}`);
+		if (!ok) return false;
+	}
+	await mkdir(targetCwd, { recursive: true });
+	return true;
+}
+
+async function moveRepoDirectory(sourceCwd: string, targetCwd: string, force: boolean, dryRun: boolean, confirm: (title: string, message: string) => Promise<boolean>): Promise<"moved" | "dry-run" | "skipped"> {
+	const sourceStat = await stat(sourceCwd).catch(() => undefined);
+	if (!sourceStat?.isDirectory()) throw new Error(`Source repo directory is not a directory: ${sourceCwd}`);
+	const targetStat = await stat(targetCwd).catch(() => undefined);
+	if (targetStat) throw new Error(`Target repo path already exists: ${targetCwd}`);
+	if (dryRun) return "dry-run";
+	await mkdir(dirname(targetCwd), { recursive: true });
+	if (!force) {
+		const ok = await confirm("Move repo directory?", [`This will move the repo directory on disk and then relocate its Pi session bucket.`, "", `From: ${sourceCwd}`, `To:   ${targetCwd}`, "", "Original session files are not deleted."].join("\n"));
+		if (!ok) return "skipped";
+	}
+	await rename(sourceCwd, targetCwd);
+	return "moved";
 }
 
 function formatLeaf(label: string, record: RelocationRecord | undefined, files = false): string[] {
@@ -650,9 +702,10 @@ export default function (pi: ExtensionAPI) {
 
 			const oldCwd = normalizeDir(ctx.cwd);
 			const targetCwd = normalizeDir(isAbsolute(target) ? target : resolve(ctx.cwd, target));
-			const targetStat = await stat(targetCwd).catch(() => undefined);
-			if (!targetStat?.isDirectory()) {
-				ctx.ui.notify(`Not a directory: ${targetCwd}`, "error");
+			try {
+				if (!(await ensureTargetDirectory(targetCwd, force, false, ctx.ui.confirm))) return;
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 				return;
 			}
 
@@ -678,7 +731,12 @@ export default function (pi: ExtensionAPI) {
 				if (!ok) return;
 			}
 
-			const original = await readFile(sessionFile, "utf8");
+			const original = await readFile(sessionFile, "utf8").catch((error) => {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+					throw new Error(["Current Pi session file is missing; cannot relocate this live process.", "", `Missing: ${sessionFile}`, "", "Try /session, /relocate-lineage --files, or start a fresh Pi session in the target directory."].join("\n"));
+				}
+				throw error;
+			});
 			let relocated = replaceAllLiteral(original, oldCwd, targetCwd);
 
 			// Handle rare JSON produced with escaped slashes.
@@ -708,6 +766,8 @@ export default function (pi: ExtensionAPI) {
 				sourceSessionId: sessionId,
 				destinationSessionId: sessionId,
 				mode: branch ? "branch" : "move",
+				sourceLinesAtEvent: original.split("\n").filter((line) => line.trim()).length,
+				sourceBytesAtEvent: Buffer.byteLength(original),
 			} satisfies RelocationRecord;
 			await appendManifest(record);
 			let storeWarning: string | undefined;
@@ -738,6 +798,49 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("relocate-repo", {
+		description: "Move a repo directory on disk and relocate all sessions in its old cwd bucket. Use --dry-run first.",
+		handler: async (args, ctx) => {
+			const { source, target, force, branch, dryRun } = parseRepoArgs(args);
+			if (!source || !target) {
+				ctx.ui.notify("Usage: /relocate-repo [--dry-run] [--branch] [--force] <source-repo> <target-repo>", "error");
+				return;
+			}
+			const sourceCwd = normalizeDir(isAbsolute(source) ? source : resolve(ctx.cwd, source));
+			const targetCwd = normalizeDir(isAbsolute(target) ? target : resolve(ctx.cwd, target));
+			const files = await sessionFilesInBucket(sourceCwd);
+			const mode = branch ? "branch" : "move";
+			const preview = ["Repo relocation", "", `From: ${sourceCwd}`, `To:   ${targetCwd}`, `Mode: ${mode}`, `Session files: ${files.length}`, ...(dryRun ? ["", "Dry run only; repo and sessions will not be moved."] : [])].filter(Boolean).join("\n");
+			if (dryRun) {
+				ctx.ui.notify(preview, "info");
+				return;
+			}
+			try {
+				const moved = await moveRepoDirectory(sourceCwd, targetCwd, force, false, ctx.ui.confirm);
+				if (moved === "skipped") return;
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				return;
+			}
+			const batchId = hashId("batch", new Date().toISOString(), sourceCwd, targetCwd, String(files.length));
+			let ok = 0;
+			let failed = 0;
+			let replacements = 0;
+			const failures: string[] = [];
+			for (const file of files) {
+				try {
+					const result = await relocateSessionFile(file, sourceCwd, targetCwd, mode, batchId, displayName(ctx));
+					ok++;
+					replacements += result.replacements;
+				} catch (error) {
+					failed++;
+					failures.push(`${shortPath(file)}: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+			ctx.ui.notify(["Repo relocation complete", "", `Repo moved: ${sourceCwd} -> ${targetCwd}`, `Session records written: ${ok}`, `Session failures: ${failed}`, `Total direct replacements: ${replacements}`, "Original session files were not deleted.", ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
+		},
+	});
+
 	pi.registerCommand("relocate-bucket", {
 		description: "Relocate all session files in the current cwd bucket to another cwd. Originals are not deleted; move mode marks them superseded in the store. Use --dry-run first.",
 		handler: async (args, ctx) => {
@@ -748,9 +851,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			const oldCwd = normalizeDir(ctx.cwd);
 			const targetCwd = normalizeDir(isAbsolute(target) ? target : resolve(ctx.cwd, target));
-			const targetStat = await stat(targetCwd).catch(() => undefined);
-			if (!targetStat?.isDirectory()) {
-				ctx.ui.notify(`Not a directory: ${targetCwd}`, "error");
+			try {
+				if (!(await ensureTargetDirectory(targetCwd, force, dryRun, ctx.ui.confirm))) return;
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 				return;
 			}
 			const files = await sessionFilesInBucket(oldCwd);
