@@ -1,8 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { chmod, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+
+const execFileAsync = promisify(execFile);
 
 function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'"'"'`)}'`;
@@ -375,6 +379,10 @@ function displayName(ctx: any): string | undefined {
 	return candidates[0];
 }
 
+async function launchInTerminal(scriptFile: string): Promise<void> {
+	await execFileAsync("osascript", ["-e", `tell application "Terminal" to do script ${JSON.stringify(`bash ${shellQuote(scriptFile)}`)}`, "-e", `tell application "Terminal" to activate`]);
+}
+
 async function writeRestartScripts(targetCwd: string, sessionFile: string, sessionId?: string, name?: string): Promise<{ scriptFile: string; latestFile: string }> {
 	const dir = relocationScriptsDir();
 	await mkdir(dir, { recursive: true });
@@ -492,19 +500,23 @@ function parseWords(args: string): string[] {
 	return words;
 }
 
-function parseArgs(args: string): { target?: string; force: boolean; branch: boolean; dryRun: boolean } {
+function parseArgs(args: string): { target?: string; force: boolean; branch: boolean; dryRun: boolean; launch: boolean; shutdown: boolean } {
 	let force = false;
 	let branch = false;
 	let dryRun = false;
+	let launch = false;
+	let shutdown = false;
 	const positional: string[] = [];
 	for (const value of parseWords(args)) {
 		if (value === "--force" || value === "-f") force = true;
 		else if (value === "--branch" || value === "--copy") branch = true;
 		else if (value === "--dry-run" || value === "-n") dryRun = true;
+		else if (value === "--launch") launch = true;
+		else if (value === "--shutdown") shutdown = true;
 		else positional.push(value);
 	}
 
-	return { target: positional.join(" ") || undefined, force, branch, dryRun };
+	return { target: positional.join(" ") || undefined, force, branch, dryRun, launch, shutdown };
 }
 
 function parseRepoArgs(args: string): { source?: string; target?: string; force: boolean; branch: boolean; dryRun: boolean; usageError: boolean } {
@@ -795,9 +807,9 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Copy this session to another cwd by replacing old path strings; restart Pi there with --session. Records lineage in relocations.jsonl. No LLM call.",
 		handler: async (args, ctx) => {
-			const { target, force, branch } = parseArgs(args);
+			const { target, force, branch, launch, shutdown } = parseArgs(args);
 			if (!target) {
-				ctx.ui.notify("Usage: /relocate [--force] <target-directory>", "error");
+				ctx.ui.notify("Usage: /relocate [--launch] [--shutdown] [--force] <target-directory>", "error");
 				return;
 			}
 
@@ -885,6 +897,15 @@ export default function (pi: ExtensionAPI) {
 				storeWarning = `Canonical store update failed; raw manifest was written. ${error instanceof Error ? error.message : String(error)}`;
 			}
 
+			let launchWarning: string | undefined;
+			if (launch) {
+				try {
+					await launchInTerminal(restart.latestFile);
+					if (shutdown) await ctx.shutdown?.();
+				} catch (error) {
+					launchWarning = `Terminal launch failed: ${error instanceof Error ? error.message : String(error)}`;
+				}
+			}
 			const command = `bash ${shellQuote(restart.latestFile)}`;
 			ctx.ui.notify(
 				[
@@ -898,6 +919,7 @@ export default function (pi: ExtensionAPI) {
 					command,
 					"",
 					`Mode: ${branch ? "branch/copy" : "move; source marked superseded in canonical store"}`,
+					...(launch ? ["", launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []),
 					...(name ? ["", `Session name preserved in restart script: ${name}`] : []),
 					...(storeWarning ? ["", storeWarning] : []),
 				].join("\n"),
@@ -1015,9 +1037,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("relocate-bucket", {
 		description: "Relocate all session files in the current cwd bucket to another cwd. Originals are not deleted; move mode marks them superseded in the store. Use --dry-run first.",
 		handler: async (args, ctx) => {
-			const { target, force, branch, dryRun } = parseArgs(args);
+			const { target, force, branch, dryRun, launch, shutdown } = parseArgs(args);
 			if (!target) {
-				ctx.ui.notify("Usage: /relocate-bucket [--dry-run] [--branch] [--force] <target-directory>", "error");
+				ctx.ui.notify("Usage: /relocate-bucket [--dry-run] [--launch] [--shutdown] [--branch] [--force] <target-directory>", "error");
 				return;
 			}
 			const oldCwd = normalizeDir(ctx.cwd);
@@ -1058,15 +1080,30 @@ export default function (pi: ExtensionAPI) {
 			let ok = 0;
 			let failed = 0;
 			let replacements = 0;
+			let restart: { scriptFile: string; latestFile: string } | undefined;
+			let launchWarning: string | undefined;
+			const currentSessionFile = ctx.sessionManager?.getSessionFile?.();
 			const failures: string[] = [];
 			for (const file of files) {
 				try {
 					const result = await relocateSessionFile(file, oldCwd, targetCwd, mode, batchId, displayName(ctx));
 					ok++;
 					replacements += result.replacements;
+					if (file === currentSessionFile) restart = await writeRestartScripts(targetCwd, result.record.destinationSession, ctx.sessionManager?.getSessionId?.(), displayName(ctx));
 				} catch (error) {
 					failed++;
 					failures.push(`${shortPath(file)}: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+			if (launch) {
+				if (!restart) launchWarning = "No restart script was written for the current live session in this bucket.";
+				else {
+					try {
+						await launchInTerminal(restart.latestFile);
+						if (shutdown) await ctx.shutdown?.();
+					} catch (error) {
+						launchWarning = `Terminal launch failed: ${error instanceof Error ? error.message : String(error)}`;
+					}
 				}
 			}
 			ctx.ui.notify([
@@ -1078,6 +1115,8 @@ export default function (pi: ExtensionAPI) {
 				`Total direct replacements: ${replacements}`,
 				"Original files were not deleted.",
 				...(mode === "move" ? ["Source observations were marked superseded/deletion-review candidates in the canonical store."] : ["Branch mode: source observations remain active."]),
+				...(restart ? ["", "Restart script:", restart.scriptFile, "Restart Pi with:", `bash ${shellQuote(restart.latestFile)}`] : []),
+				...(launch ? ["", launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []),
 				...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : []),
 			].join("\n"), failed ? "warning" : "info");
 		},
