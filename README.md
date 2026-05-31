@@ -1,97 +1,110 @@
 # pi-relocate
 
-Pi extension that copies the current session JSONL to another working directory by replacing the old absolute cwd with the new absolute cwd. It does **not** invoke the LLM and does **not** try to switch the live Pi process.
+Pi extension for moving Pi session context when projects move. It can relocate the current session, whole session buckets, actual repo directories, or roots full of repos. It does **not** invoke the LLM.
 
 ## Install
-
-From this repository:
 
 ```bash
 pi install git:github.com/ProbabilityEngineer/pi-relocate
 ```
 
-Or load locally while testing:
+Local testing:
 
 ```bash
 pi -e ./index.ts
 ```
 
-## Usage
-
-Inside Pi:
+## Commands
 
 ```text
-/relocate [--branch] <target-directory>
-/relocate-bucket [--dry-run] [--branch] <target-directory>
+/relocate [--launch] [--shutdown] [--branch] [--force] <target-directory>
+/relocate-bucket [--dry-run] [--launch] [--shutdown] [--branch] [--force] <target-directory>
+/relocate-repo [--dry-run] [--branch] [--force] <target-repo>
+/relocate-repo [--dry-run] [--branch] [--force] <source-repo> <target-repo>
+/relocate-repos [--dry-run] [--branch] [--force] <old-root> <new-root>
+/relocate-prune [--dry-run] [--stage] [--duplicates] [--force]
+/relocate-store-replay [--crawl-sessions]
 /relocate-status [--all]
 /relocate-lineage [--files]
-/relocate-store-replay
 ```
 
-Example:
+## Which command should I use?
+
+- Use `/relocate` to copy only the current live session to another cwd bucket and write a restart script.
+- Use `/relocate-bucket` when the repo/cwd already moved and all sessions in the old bucket should point at the new cwd.
+- Use `/relocate-repo <target>` to move the current repo directory on disk and relocate its session bucket.
+- Use `/relocate-repo <source> <target>` to move an explicit repo directory and relocate its session bucket.
+- Use `/relocate-repos <old-root> <new-root>` to move immediate child repos from one root to another.
+- Use `/relocate-prune --dry-run` to preview cleanup of superseded source session files.
+- Use `/relocate-store-replay --crawl-sessions` after restoring files or rebuilding the store.
+
+## Move vs branch
+
+Default mode is move semantics: destination becomes active and the old source observation is marked `superseded` and `deletion_candidate` in the canonical store. The source JSONL is not deleted during relocation.
+
+Use `--branch`/`--copy` when both source and destination should remain active. Branch records do not become prune candidates.
+
+## Restart and launch
+
+Relocation writes scripts under:
 
 ```text
-/relocate ./my-new-repo
+~/.pi/agent/relocations/
 ```
 
-The command will:
-
-1. resolve the target directory relative to Pi's current cwd,
-2. confirm the relocation,
-3. copy the current session file into the target cwd's Pi session bucket,
-4. replace occurrences of the old absolute cwd with the new absolute cwd,
-5. append a lineage record to `~/.pi/agent/relocations.jsonl`,
-6. best-effort update the canonical SQLite session store at `~/.pi/agent/session-store/session-store.sqlite`,
-7. write short restart scripts under `~/.pi/agent/relocations/`, and
-8. print a short restart command.
-
-Restart with the printed command, which looks like:
+Restart manually with:
 
 ```bash
 bash ~/.pi/agent/relocations/latest.sh
 ```
 
-The extension also writes a timestamped script for each relocation:
+`--launch` opens Terminal.app running the restart script. `--shutdown` requests shutdown of the old Pi process only after a successful launch and only when explicitly supplied.
 
-```text
-~/.pi/agent/relocations/run-<timestamp>.sh
-```
+## Store and manifest
 
-Restart scripts intentionally use `pi --session <exact-file>` rather than `pi --session-id <id>`. Pi 0.76 adds `--session-id` for exact project-local automation, and `pi-relocate` records session IDs for lineage, but copied relocated files still use the verified exact-file path until ID-to-file behavior is validated for this workflow.
-
-When Pi exposes a current session display name, restart scripts preserve it with `--name`, and the canonical store records it as a `display_name` label separate from cwd/project labels.
-
-Use `--force` to skip confirmation:
-
-```text
-/relocate --force ./my-new-repo
-```
-
-## Lineage
-
-`/relocate` records each copy in:
+Raw manifest:
 
 ```text
 ~/.pi/agent/relocations.jsonl
 ```
 
-Each record includes the timestamp, source cwd, target cwd, source session file, destination session file, parent session, replacement count, and Pi session ID when available.
-
-The raw manifest remains the durable fallback. Store updates are best-effort: if SQLite writing fails, relocation still succeeds after the raw manifest append and the user is warned. By default `/relocate` uses move semantics in the canonical store: the source observation is marked `superseded` and `deletion_candidate` for manual review, but the original file is never deleted. Use `--branch` when you intentionally want both source and destination to remain active. Use `/relocate-store-replay` to replay `relocations.jsonl` into the canonical store after DB rebuilds or schema upgrades.
-
-Use `/relocate-bucket` when a whole repo/cwd bucket moved and all sessions in the source bucket should be copied to the destination bucket. Always start with:
+Canonical SQLite store:
 
 ```text
-/relocate-bucket --dry-run <target-directory>
+~/.pi/agent/session-store/session-store.sqlite
 ```
 
-Then run without `--dry-run` after reviewing the affected sessions. Bucket relocation writes one manifest/store edge per copied session, records a batch id in the store, and marks old source observations for manual deletion review in move mode. It does not delete originals.
+The manifest is append-only and is not rewritten. `/relocate-store-replay` replays manifest records into SQLite. With `--crawl-sessions`, it also indexes every `~/.pi/agent/sessions/**/*.jsonl` as an observation without inventing lineage edges.
 
-Use `/relocate-status` for a compact overview: current session tracking, latest relocations, fork count, and unrecorded relocated file count. Use `/relocate-status --all` for full recorded and discovered details.
+Replay understands mixed session filename formats, including base session files, modern `_relocated_<timestamp>` suffixes, and older `_relocated_<cwd-slug>_<timestamp>` suffixes. If filename parsing fails, store keys still fall back to full file path.
 
-Use `/relocate-lineage` to show the current session's ancestry chain plus whether the current session has known descendants, whether it is a latest leaf, and the newest/longest descendant leaf when available. Use `/relocate-lineage --files` to include source and destination session paths. Output marks old reconstructed records as `inferred` and new manifest records as `explicit`.
+## Pruning
 
-Agents can use the compact read-only tool:
+Pruning is separate from relocation.
+
+```text
+/relocate-prune --dry-run
+/relocate-prune --stage
+/relocate-prune
+```
+
+Safe candidates require a replacement file, must not be the current live session, must not be branch/copy records, and must pass line/byte checkpoint checks when available.
+
+`--stage` moves candidates to:
+
+```text
+~/.pi/agent/session-archive/to-delete/<timestamp>/<bucket>/<file>.jsonl
+```
+
+Without `--stage`, eligible files move to `~/.Trash`. Outcomes are recorded in SQLite `prune_operations`.
+
+`--duplicates` previews duplicate accumulated copies grouped by provider session id. Use `--force` with duplicate mode only after manual review.
+
+## Status and lineage
+
+`/relocate-status` shows current tracking, manifest counts, fork counts, and unrecorded relocated files. `/relocate-lineage --files` shows ancestry with source/destination paths.
+
+Agents can use the read-only tool:
 
 ```text
 relocate action: status/lineage
@@ -99,7 +112,7 @@ relocate action: status/lineage
 
 ## Notes
 
-- The original session file is never modified.
-- The relocated session is a plain JSONL copy with string replacements.
-- Treat relocated sessions like branches: continue from the newest intended descendant, not an older repo-local ancestor, unless you intentionally want to go back in time.
-- This is intended for workflows where you started Pi in a parent directory, created or cloned a repo, and then want to continue from that repo's cwd.
+- Raw session JSONLs are never modified in place.
+- Relocated sessions are JSONL copies with path string replacements.
+- Compaction appends summary entries; it does not shrink the JSONL.
+- Active Git/code repos are best kept local; cloud folders are better for small archives/reference material.

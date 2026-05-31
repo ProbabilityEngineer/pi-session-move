@@ -34,6 +34,22 @@ function defaultAgentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? ".", ".pi", "agent");
 }
 
+type ParsedSessionFilename = { baseTimestamp?: string; providerSessionId?: string; relocatedTimestamp?: string; relocatedCwdSlug?: string; isRelocated: boolean };
+
+function parseSessionFilename(path: string): ParsedSessionFilename {
+	const name = basename(path).replace(/\.jsonl$/i, "");
+	const uuid = name.match(/(?:^|_)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_|$)/i)?.[1];
+	const baseTimestamp = name.match(/^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/)?.[1];
+	const relocated = name.match(/_relocated_(?:(.+)_)?(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)$/);
+	return { baseTimestamp, providerSessionId: uuid, relocatedCwdSlug: relocated?.[1], relocatedTimestamp: relocated?.[2], isRelocated: Boolean(relocated) };
+}
+
+function cwdFromSessionBucket(path: string): string | undefined {
+	const bucket = basename(dirname(path));
+	const match = bucket.match(/^--(.+)--$/);
+	return match ? `/${match[1].replace(/-/g, "/")}` : undefined;
+}
+
 function uniqueRelocatedName(originalFile: string): string {
 	const parsed = basename(originalFile).replace(/\.jsonl$/i, "");
 	const originalSessionId = parsed.split("_relocated_")[0] || "session";
@@ -156,6 +172,40 @@ async function appendStoreRecord(record: RelocationRecord, name?: string): Promi
 	} finally {
 		db.close();
 	}
+}
+
+async function indexSessionObservation(path: string): Promise<void> {
+	const parsed = parseSessionFilename(path);
+	const cwd = cwdFromSessionBucket(path);
+	const stats = await sessionStats(path);
+	const db = new DatabaseSync(storeFile());
+	try {
+		initStore(db);
+		const sourceId = "source_pi_sessions_crawl";
+		db.prepare("INSERT OR IGNORE INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(sourceId, "pi", "sessions_crawl", join(defaultAgentDir(), "sessions"), "Pi sessions crawl", null, null, "{}");
+		const sessionId = sessionFileId(path);
+		const obsId = observationId(path);
+		db.prepare("INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(sessionId, "pi", parsed.providerSessionId ?? null, path, null, stats.fileMtime, parsed.baseTimestamp ?? null, null, null, stats.lineCount, stats.byteCount, null, null, JSON.stringify({ cwd, filename: parsed }));
+		db.prepare("INSERT OR REPLACE INTO session_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(obsId, sessionId, sourceId, path, parsed.providerSessionId ?? null, new Date().toISOString(), "sessions-crawl", stats.fileBirthtime, stats.fileMtime, stats.byteCount, stats.lineCount, null, null, null, null, JSON.stringify({ cwd, filename: parsed, unlinkedObservation: true }));
+		db.prepare("INSERT OR REPLACE INTO labels VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(hashId("label", sessionId, "cwd", cwd), "session", sessionId, "cwd", cwd ?? "unknown", null, null, "inferred", sourceId, null, "{}");
+	} finally { db.close(); }
+}
+
+async function crawlSessionFiles(root = join(defaultAgentDir(), "sessions")): Promise<{ indexed: number; failed: number }> {
+	let indexed = 0;
+	let failed = 0;
+	async function walk(dir: string): Promise<void> {
+		const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+		for (const entry of entries) {
+			const path = join(dir, entry.name);
+			if (entry.isDirectory()) await walk(path);
+			else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+				try { await indexSessionObservation(path); indexed++; } catch { failed++; }
+			}
+		}
+	}
+	await walk(root);
+	return { indexed, failed };
 }
 
 async function replayManifestToStore(records?: RelocationRecord[]): Promise<{ ok: number; failed: number }> {
@@ -281,6 +331,37 @@ async function classifyPruneCandidates(currentSession?: string): Promise<PruneCa
 		}
 	}
 	return candidates;
+}
+
+async function uniqueStagePath(sourcePath: string, batch: string): Promise<string> {
+	const bucket = basename(dirname(sourcePath));
+	const dir = join(defaultAgentDir(), "session-archive", "to-delete", batch, bucket);
+	await mkdir(dir, { recursive: true });
+	let candidate = join(dir, basename(sourcePath));
+	let index = 1;
+	while (await stat(candidate).then(() => true, () => false)) candidate = join(dir, `${basename(sourcePath)}.${index++}`);
+	return candidate;
+}
+
+function duplicatePruneCandidates(candidates: PruneCandidate[], currentSession?: string): PruneCandidate[] {
+	const groups = new Map<string, PruneCandidate[]>();
+	for (const candidate of candidates) {
+		const id = parseSessionFilename(candidate.sourcePath).providerSessionId;
+		if (!id) continue;
+		const group = groups.get(id) ?? [];
+		group.push(candidate);
+		groups.set(id, group);
+	}
+	const out: PruneCandidate[] = [];
+	for (const group of groups.values()) {
+		if (group.length < 2) continue;
+		const sorted = group.sort((a, b) => a.sourcePath.localeCompare(b.sourcePath));
+		for (const candidate of sorted.slice(0, -1)) {
+			if (candidate.sourcePath === currentSession) continue;
+			out.push({ ...candidate, category: candidate.category === "unsafe" ? "unsafe" : "legacy-review", reason: `duplicate provider session id; keeping ${shortPath(sorted[sorted.length - 1].sourcePath)}` });
+		}
+	}
+	return out;
 }
 
 function recordPruneOperation(candidate: PruneCandidate, status: string, action: string, reason: string, trashPath?: string) {
@@ -432,7 +513,7 @@ async function relocateSessionFile(sourceFile: string, oldCwd: string, targetCwd
 	await mkdir(destinationDir, { recursive: true });
 	const destinationFile = join(destinationDir, uniqueRelocatedName(sourceFile));
 	await writeFile(destinationFile, relocated, { encoding: "utf8", flag: "wx" });
-	const sessionId = basename(sourceFile).match(/_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_|\.|$)/)?.[1];
+	const sessionId = parseSessionFilename(sourceFile).providerSessionId;
 	const record = { ts: new Date().toISOString(), fromCwd: oldCwd, toCwd: targetCwd, sourceSession: sourceFile, destinationSession: destinationFile, parent: sourceFile, replacements, sourceSessionId: sessionId, destinationSessionId: sessionId, mode, batchId, sourceLinesAtEvent: original.split("\n").filter((line) => line.trim()).length, sourceBytesAtEvent: Buffer.byteLength(original) } satisfies RelocationRecord;
 	await appendManifest(record);
 	await appendStoreRecord(record, name);
@@ -1127,9 +1208,12 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const dryRun = hasFlag(args, "--dry-run") || hasFlag(args, "-n");
 			const force = hasFlag(args, "--force") || hasFlag(args, "-f");
-			const candidates = await classifyPruneCandidates(ctx.sessionManager?.getSessionFile?.());
-			const eligible = candidates.filter((c) => c.category === "eligible");
-			const legacy = candidates.filter((c) => c.category === "legacy-review");
+			const stage = hasFlag(args, "--stage");
+			const duplicates = hasFlag(args, "--duplicates");
+			let candidates = await classifyPruneCandidates(ctx.sessionManager?.getSessionFile?.());
+			if (duplicates) candidates = [...candidates, ...duplicatePruneCandidates(candidates, ctx.sessionManager?.getSessionFile?.())];
+			const eligible = candidates.filter((c) => c.category === "eligible" || (duplicates && force && c.category === "legacy-review"));
+			const legacy = candidates.filter((c) => c.category === "legacy-review" && !(duplicates && force));
 			const unsafe = candidates.filter((c) => c.category === "unsafe");
 			const preview = [
 				"Relocation prune candidates",
@@ -1138,7 +1222,7 @@ export default function (pi: ExtensionAPI) {
 				`Legacy/manual review: ${legacy.length}`,
 				`Unsafe/skipped: ${unsafe.length}`,
 				"",
-				...eligible.slice(0, 20).map((c) => `- ${shortPath(c.sourcePath)} -> Trash (${c.reason})`),
+				...eligible.slice(0, 20).map((c) => `- ${shortPath(c.sourcePath)} -> ${stage ? "stage" : "Trash"} (${c.reason})`),
 				...(eligible.length > 20 ? [`- ... ${eligible.length - 20} more eligible`] : []),
 				...(legacy.length ? ["", "Legacy/manual review:", ...legacy.slice(0, 10).map((c) => `- ${shortPath(c.sourcePath)} (${c.reason})`)] : []),
 				...(unsafe.length ? ["", "Unsafe/skipped:", ...unsafe.slice(0, 10).map((c) => `- ${shortPath(c.sourcePath)} (${c.reason})`)] : []),
@@ -1158,11 +1242,12 @@ export default function (pi: ExtensionAPI) {
 			let trashed = 0;
 			let failed = 0;
 			const failures: string[] = [];
+			const stageBatch = scriptStamp();
 			for (const candidate of eligible) {
 				try {
-					const trashPath = await uniqueTrashPath(candidate.sourcePath);
+					const trashPath = stage ? await uniqueStagePath(candidate.sourcePath, stageBatch) : await uniqueTrashPath(candidate.sourcePath);
 					await rename(candidate.sourcePath, trashPath);
-					recordPruneOperation(candidate, "trashed", "trash", candidate.reason, trashPath);
+					recordPruneOperation(candidate, stage ? "staged" : "trashed", stage ? "stage" : "trash", candidate.reason, trashPath);
 					trashed++;
 				} catch (error) {
 					failed++;
@@ -1171,24 +1256,26 @@ export default function (pi: ExtensionAPI) {
 					failures.push(`${shortPath(candidate.sourcePath)}: ${reason}`);
 				}
 			}
-			ctx.ui.notify(["Relocation prune complete", "", `Trashed: ${trashed}`, `Failed: ${failed}`, `Legacy/manual review skipped: ${legacy.length}`, `Unsafe skipped: ${unsafe.length}`, ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
+			ctx.ui.notify(["Relocation prune complete", "", `${stage ? "Staged" : "Trashed"}: ${trashed}`, ...(stage ? [`Stage batch: ${join(defaultAgentDir(), "session-archive", "to-delete", stageBatch)}`] : []), `Failed: ${failed}`, `Legacy/manual review skipped: ${legacy.length}`, `Unsafe skipped: ${unsafe.length}`, ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
 		},
 	});
 
 	pi.registerCommand("relocate-store-replay", {
-		description: "Replay relocations.jsonl into the canonical SQLite session store. Does not mutate session JSONLs.",
-		handler: async (_args, ctx) => {
+		description: "Replay relocations.jsonl into the canonical SQLite session store. Add --crawl-sessions to index all session JSONLs. Does not mutate session JSONLs.",
+		handler: async (args, ctx) => {
 			const result = await replayManifestToStore();
+			const crawl = hasFlag(args, "--crawl-sessions") ? await crawlSessionFiles() : undefined;
 			ctx.ui.notify([
 				"Relocation store replay complete",
 				"",
 				`Manifest: ${shortPath(manifestFile())}`,
 				`Store: ${shortPath(storeFile())}`,
-				`Written/updated: ${result.ok}`,
-				`Failed: ${result.failed}`,
+				`Manifest records written/updated: ${result.ok}`,
+				`Manifest failures: ${result.failed}`,
+				...(crawl ? [`Crawl indexed: ${crawl.indexed}`, `Crawl failed: ${crawl.failed}`] : []),
 				"",
 				"Session JSONLs and relocations.jsonl were not modified.",
-			].join("\n"), result.failed ? "warning" : "info");
+			].join("\n"), result.failed || crawl?.failed ? "warning" : "info");
 		},
 	});
 

@@ -1,6 +1,6 @@
 ---
 id: pr-docs-command-reference
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-05-31T05:00:00Z

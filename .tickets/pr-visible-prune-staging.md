@@ -1,6 +1,6 @@
 ---
 id: pr-visible-prune-staging
-status: open
+status: closed
 deps: [pr-prune-superseded]
 links: []
 created: 2026-05-31T05:00:00Z
