@@ -8,8 +8,16 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+function normalizeDraggedPath(value: string): string {
+	// Finder/terminal dragged paths often arrive as shell-escaped text, e.g.
+	// /Users/sam/Library/Mobile\ Documents/com\~apple\~CloudDocs
+	// Extension args are already strings, not shell-evaluated, so unescape common
+	// single-character shell escapes before resolving/statting.
+	return value.replace(/\\(.)/g, "$1");
+}
+
 function normalizeDir(value: string): string {
-	return resolve(value);
+	return resolve(normalizeDraggedPath(value));
 }
 
 function sessionBucketName(cwd: string): string {
@@ -352,16 +360,41 @@ function replaceAllLiteral(input: string, from: string, to: string): string {
 }
 
 function parseWords(args: string): string[] {
-	const parts = args.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-	return parts.map((part) => {
-		if (
-			(part.startsWith('"') && part.endsWith('"')) ||
-			(part.startsWith("'") && part.endsWith("'"))
-		) {
-			return part.slice(1, -1);
+	const words: string[] = [];
+	let current = "";
+	let quote: "'" | '"' | undefined;
+	let escaping = false;
+	for (const char of args) {
+		if (escaping) {
+			current += char;
+			escaping = false;
+			continue;
 		}
-		return part;
-	});
+		if (char === "\\") {
+			escaping = true;
+			continue;
+		}
+		if (quote) {
+			if (char === quote) quote = undefined;
+			else current += char;
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+			continue;
+		}
+		if (/\s/.test(char)) {
+			if (current) {
+				words.push(current);
+				current = "";
+			}
+			continue;
+		}
+		current += char;
+	}
+	if (escaping) current += "\\";
+	if (current) words.push(current);
+	return words;
 }
 
 function parseArgs(args: string): { target?: string; force: boolean; branch: boolean; dryRun: boolean } {

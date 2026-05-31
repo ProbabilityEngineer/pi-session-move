@@ -1,6 +1,6 @@
 ---
 id: pr-normalize-dragged-paths
-status: in_progress
+status: closed
 deps: []
 links: []
 created: 2026-05-31T03:45:00Z
