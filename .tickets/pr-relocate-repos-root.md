@@ -1,6 +1,6 @@
 ---
 id: pr-relocate-repos-root
-status: open
+status: closed
 deps: [pr-relocate-repo]
 links: []
 created: 2026-05-31T04:20:00Z

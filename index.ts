@@ -640,6 +640,27 @@ async function moveRepoDirectory(sourceCwd: string, targetCwd: string, force: bo
 	return "moved";
 }
 
+async function isRepoDir(path: string): Promise<boolean> {
+	return (await stat(join(path, ".git")).then(() => true, () => false)) || (await stat(join(path, ".jj")).then(() => true, () => false));
+}
+
+type RepoMovePlan = { source: string; target: string; sessionCount: number; status: "ready" | "target-exists" | "no-sessions" };
+
+async function repoMovePlans(oldRoot: string, newRoot: string): Promise<RepoMovePlan[]> {
+	const entries = await readdir(oldRoot, { withFileTypes: true });
+	const plans: RepoMovePlan[] = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+		const source = join(oldRoot, entry.name);
+		if (!(await isRepoDir(source))) continue;
+		const target = join(newRoot, entry.name);
+		const sessionCount = (await sessionFilesInBucket(source)).length;
+		const targetExists = await stat(target).then(() => true, () => false);
+		plans.push({ source, target, sessionCount, status: targetExists ? "target-exists" : sessionCount ? "ready" : "no-sessions" });
+	}
+	return plans.sort((a, b) => a.source.localeCompare(b.source));
+}
+
 function formatLeaf(label: string, record: RelocationRecord | undefined, files = false): string[] {
 	if (!record) return [`${label}: none`];
 	const lines = [`${label}: ${cwdLabel(record.toCwd)} @ ${record.ts}`];
@@ -926,6 +947,68 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			ctx.ui.notify(["Repo relocation complete", "", `Repo moved: ${sourceCwd} -> ${targetCwd}`, `Session records written: ${ok}`, `Session failures: ${failed}`, `Total direct replacements: ${replacements}`, "Original session files were not deleted.", ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
+		},
+	});
+
+	pi.registerCommand("relocate-repos", {
+		description: "Move child repo directories from one root to another and relocate each repo session bucket. Use --dry-run first.",
+		handler: async (args, ctx) => {
+			const { source, target, force, branch, dryRun, usageError } = parseRepoArgs(args);
+			if (usageError || !source || !target) {
+				ctx.ui.notify("Usage: /relocate-repos [--dry-run] [--branch] [--force] <old-root> <new-root>", "error");
+				return;
+			}
+			const oldRoot = normalizeDir(isAbsolute(source) ? source : resolve(ctx.cwd, source));
+			const newRoot = normalizeDir(isAbsolute(target) ? target : resolve(ctx.cwd, target));
+			let plans: RepoMovePlan[];
+			try {
+				plans = await repoMovePlans(oldRoot, newRoot);
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				return;
+			}
+			const ready = plans.filter((plan) => plan.status === "ready");
+			const skipped = plans.filter((plan) => plan.status !== "ready");
+			const mode = branch ? "branch" : "move";
+			const preview = ["Repo root relocation", "", `From root: ${oldRoot}`, `To root:   ${newRoot}`, `Mode: ${mode}`, `Ready repos: ${ready.length}`, `Skipped: ${skipped.length}`, "", ...ready.slice(0, 20).map((plan) => `- ${basename(plan.source)} (${plan.sessionCount} sessions)`), ...(ready.length > 20 ? [`- ... ${ready.length - 20} more ready`] : []), ...(skipped.length ? ["", "Skipped:", ...skipped.slice(0, 10).map((plan) => `- ${basename(plan.source)} (${plan.status})`)] : [])].join("\n");
+			if (dryRun) {
+				ctx.ui.notify(`${preview}\n\nDry run only; no repos or sessions were moved.`, "info");
+				return;
+			}
+			if (!ready.length) {
+				ctx.ui.notify(`${preview}\n\nNo ready repos to move.`, "info");
+				return;
+			}
+			if (!force) {
+				const ok = await ctx.ui.confirm("Move repo root children?", `${preview}\n\nThis moves ready repo directories and relocates their session buckets. Original session files are not deleted.`);
+				if (!ok) return;
+			}
+			await mkdir(newRoot, { recursive: true });
+			let reposMoved = 0;
+			let sessionsWritten = 0;
+			let failed = 0;
+			const failures: string[] = [];
+			const rootBatchId = hashId("batch", new Date().toISOString(), oldRoot, newRoot, String(ready.length));
+			for (const plan of ready) {
+				try {
+					await rename(plan.source, plan.target);
+					reposMoved++;
+					const childBatchId = hashId("batch", rootBatchId, plan.source, plan.target);
+					for (const file of await sessionFilesInBucket(plan.source)) {
+						try {
+							await relocateSessionFile(file, plan.source, plan.target, mode, childBatchId, displayName(ctx));
+							sessionsWritten++;
+						} catch (error) {
+							failed++;
+							failures.push(`${shortPath(file)}: ${error instanceof Error ? error.message : String(error)}`);
+						}
+					}
+				} catch (error) {
+					failed++;
+					failures.push(`${shortPath(plan.source)}: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+			ctx.ui.notify(["Repo root relocation complete", "", `Root batch: ${rootBatchId}`, `Repos moved: ${reposMoved}`, `Session records written: ${sessionsWritten}`, `Failures: ${failed}`, `Skipped before move: ${skipped.length}`, "Original session files were not deleted.", ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
 		},
 	});
 
