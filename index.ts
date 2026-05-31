@@ -422,7 +422,7 @@ function parseArgs(args: string): { target?: string; force: boolean; branch: boo
 	return { target: positional.join(" ") || undefined, force, branch, dryRun };
 }
 
-function parseRepoArgs(args: string): { source?: string; target?: string; force: boolean; branch: boolean; dryRun: boolean } {
+function parseRepoArgs(args: string): { source?: string; target?: string; force: boolean; branch: boolean; dryRun: boolean; usageError: boolean } {
 	let force = false;
 	let branch = false;
 	let dryRun = false;
@@ -433,7 +433,9 @@ function parseRepoArgs(args: string): { source?: string; target?: string; force:
 		else if (value === "--dry-run" || value === "-n") dryRun = true;
 		else positional.push(value);
 	}
-	return { source: positional[0], target: positional[1], force, branch, dryRun };
+	if (positional.length === 1) return { target: positional[0], force, branch, dryRun, usageError: false };
+	if (positional.length === 2) return { source: positional[0], target: positional[1], force, branch, dryRun, usageError: false };
+	return { force, branch, dryRun, usageError: true };
 }
 
 function hasFlag(args: string, flag: string): boolean {
@@ -799,14 +801,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("relocate-repo", {
-		description: "Move a repo directory on disk and relocate all sessions in its old cwd bucket. Use --dry-run first.",
+		description: "Move a repo directory on disk and relocate all sessions in its old cwd bucket. Use --dry-run first. With one path, source defaults to current cwd.",
 		handler: async (args, ctx) => {
-			const { source, target, force, branch, dryRun } = parseRepoArgs(args);
-			if (!source || !target) {
-				ctx.ui.notify("Usage: /relocate-repo [--dry-run] [--branch] [--force] <source-repo> <target-repo>", "error");
+			const { source, target, force, branch, dryRun, usageError } = parseRepoArgs(args);
+			if (usageError || !target) {
+				ctx.ui.notify("Usage: /relocate-repo [--dry-run] [--branch] [--force] <target-repo> OR /relocate-repo [flags] <source-repo> <target-repo>", "error");
 				return;
 			}
-			const sourceCwd = normalizeDir(isAbsolute(source) ? source : resolve(ctx.cwd, source));
+			const sourceArg = source ?? ctx.cwd;
+			const sourceCwd = normalizeDir(isAbsolute(sourceArg) ? sourceArg : resolve(ctx.cwd, sourceArg));
 			const targetCwd = normalizeDir(isAbsolute(target) ? target : resolve(ctx.cwd, target));
 			const files = await sessionFilesInBucket(sourceCwd);
 			const mode = branch ? "branch" : "move";
