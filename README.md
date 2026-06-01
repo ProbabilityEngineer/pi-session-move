@@ -53,11 +53,20 @@ Relocation writes scripts under:
 ~/.pi/agent/relocations/
 ```
 
-Restart manually with:
+Restart manually with the copy-paste command printed by `/relocate` or `/relocate-bucket`:
+
+```bash
+cd '<target-cwd>'
+pi --session '<relocated-session-file>'
+```
+
+Relocation still writes convenience scripts under `~/.pi/agent/relocations/`, including:
 
 ```bash
 bash ~/.pi/agent/relocations/latest.sh
 ```
+
+Prefer the direct `cd` + `pi --session` command when you want the terminal shell to remain in the target cwd after Pi exits. Running `latest.sh` starts Pi in the target cwd, but the script is a child process and cannot permanently change the original shell's cwd.
 
 `--launch` opens Terminal.app running the restart script. `--shutdown` requests shutdown of the old Pi process only after a successful launch and only when explicitly supplied.
 

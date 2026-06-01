@@ -1,6 +1,6 @@
 ---
 id: pr-restart-command-instead-of-script
-status: open
+status: closed
 type: feature
 priority: 2
 created: 2026-05-31T19:25:00Z
@@ -25,3 +25,8 @@ pi --session '<session-file>'
 ## Boundary note
 
 This ticket only changes restart UX. It should not remove raw manifest writes or canonical store replay responsibilities.
+
+
+## Closure
+
+Implemented copy-paste restart blocks for `/relocate`, `/relocate-bucket`, and current-session `/relocate-repo` moves. Notifications now print direct `cd` + `pi --session` commands first, keep `latest.sh` scripts as convenience artifacts, and explain why scripts cannot leave the original shell in the target cwd. README restart docs updated. Validated with `npx tsc --noEmit`.

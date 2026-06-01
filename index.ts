@@ -529,7 +529,20 @@ async function launchInTerminal(scriptFile: string): Promise<void> {
 	await execFileAsync("osascript", ["-e", `tell application "Terminal" to do script ${JSON.stringify(`bash ${shellQuote(scriptFile)}`)}`, "-e", `tell application "Terminal" to activate`]);
 }
 
-async function writeRestartScripts(targetCwd: string, sessionFile: string, sessionId?: string, name?: string): Promise<{ scriptFile: string; latestFile: string }> {
+type RestartInfo = { scriptFile: string; latestFile: string; targetCwd: string; sessionFile: string; name?: string };
+
+function restartCommandBlock(targetCwd: string, sessionFile: string, name?: string): string[] {
+	return [
+		"Copy-paste restart command:",
+		"```bash",
+		`cd ${shellQuote(targetCwd)}`,
+		`pi ${name ? `--name ${shellQuote(name)} ` : ""}--session ${shellQuote(sessionFile)}`,
+		"```",
+		"Running the cd + pi command directly leaves your shell in the target cwd after Pi exits; executing latest.sh runs in a child shell and cannot change the original shell cwd.",
+	];
+}
+
+async function writeRestartScripts(targetCwd: string, sessionFile: string, sessionId?: string, name?: string): Promise<RestartInfo> {
 	const dir = relocationScriptsDir();
 	await mkdir(dir, { recursive: true });
 	const content = [
@@ -547,7 +560,7 @@ async function writeRestartScripts(targetCwd: string, sessionFile: string, sessi
 	await chmod(scriptFile, 0o755);
 	await writeFile(latestFile, content, { encoding: "utf8" });
 	await chmod(latestFile, 0o755);
-	return { scriptFile, latestFile };
+	return { scriptFile, latestFile, targetCwd, sessionFile, name };
 }
 
 async function readManifest(): Promise<RelocationRecord[]> {
@@ -1094,10 +1107,11 @@ export default function (pi: ExtensionAPI) {
 					`Relocated session written with ${replacements} direct path replacement${replacements === 1 ? "" : "s"}:`,
 					destinationFile,
 					"",
-					"Restart script:",
-					restart.scriptFile,
+					...restartCommandBlock(restart.targetCwd, restart.sessionFile, restart.name),
 					"",
-					"Restart Pi with:",
+					"Restart script still written for convenience:",
+					restart.scriptFile,
+					"Run script with:",
 					command,
 					"",
 					`Mode: ${branch ? "branch/copy" : "move; source marked superseded in canonical store"}`,
@@ -1139,18 +1153,21 @@ export default function (pi: ExtensionAPI) {
 			let ok = 0;
 			let failed = 0;
 			let replacements = 0;
+			let currentRestartTarget: { targetCwd: string; sessionFile: string; name?: string } | undefined;
+			const currentSessionFile = ctx.sessionManager?.getSessionFile?.();
 			const failures: string[] = [];
 			for (const file of files) {
 				try {
 					const result = await relocateSessionFile(file, sourceCwd, targetCwd, mode, batchId, displayName(ctx));
 					ok++;
 					replacements += result.replacements;
+					if (file === currentSessionFile) currentRestartTarget = { targetCwd, sessionFile: result.record.destinationSession, name: displayName(ctx) };
 				} catch (error) {
 					failed++;
 					failures.push(`${shortPath(file)}: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			}
-			ctx.ui.notify(["Repo relocation complete", "", `Repo moved: ${sourceCwd} -> ${targetCwd}`, `Session records written: ${ok}`, `Session failures: ${failed}`, `Total direct replacements: ${replacements}`, "Original session files were not deleted.", ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
+			ctx.ui.notify(["Repo relocation complete", "", `Repo moved: ${sourceCwd} -> ${targetCwd}`, `Session records written: ${ok}`, `Session failures: ${failed}`, `Total direct replacements: ${replacements}`, "Original session files were not deleted.", ...(currentRestartTarget ? ["", ...restartCommandBlock(currentRestartTarget.targetCwd, currentRestartTarget.sessionFile, currentRestartTarget.name), "", "No latest.sh restart script was updated by /relocate-repo for this repo move."] : []), ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
 		},
 	});
 
@@ -1262,7 +1279,7 @@ export default function (pi: ExtensionAPI) {
 			let ok = 0;
 			let failed = 0;
 			let replacements = 0;
-			let restart: { scriptFile: string; latestFile: string } | undefined;
+			let restart: RestartInfo | undefined;
 			let launchWarning: string | undefined;
 			const currentSessionFile = ctx.sessionManager?.getSessionFile?.();
 			const failures: string[] = [];
@@ -1297,7 +1314,7 @@ export default function (pi: ExtensionAPI) {
 				`Total direct replacements: ${replacements}`,
 				"Original files were not deleted.",
 				...(mode === "move" ? ["Source observations were marked superseded/deletion-review candidates in the canonical store."] : ["Branch mode: source observations remain active."]),
-				...(restart ? ["", "Restart script:", restart.scriptFile, "Restart Pi with:", `bash ${shellQuote(restart.latestFile)}`] : []),
+				...(restart ? ["", ...restartCommandBlock(restart.targetCwd, restart.sessionFile, restart.name), "", "Restart script still written for convenience:", restart.scriptFile, "Run script with:", `bash ${shellQuote(restart.latestFile)}`] : []),
 				...(launch ? ["", launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []),
 				...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : []),
 			].join("\n"), failed ? "warning" : "info");
