@@ -15,7 +15,7 @@ Users often copy/paste the script path anyway. Provide directly copyable shell c
 
 ```bash
 cd '<target-cwd>'
-pi --session '<session-file>'
+pi -c
 ```
 
 - Explain that running this directly leaves the shell in the target cwd after Pi exits, unlike executing a separate script from an old cwd.
@@ -29,4 +29,4 @@ This ticket only changes restart UX. It should not remove raw manifest writes or
 
 ## Closure
 
-Implemented copy-paste restart blocks for `/relocate`, `/relocate-bucket`, and current-session `/relocate-repo` moves. Notifications now print direct `cd` + `pi --session` commands first, keep `latest.sh` scripts as convenience artifacts, and explain why scripts cannot leave the original shell in the target cwd. README restart docs updated. Validated with `npx tsc --noEmit`.
+Implemented copy-paste restart blocks for `/relocate`, `/relocate-bucket`, and current-session `/relocate-repo` moves. Notifications now print direct `cd` + `pi -c` commands first, keep `latest.sh` scripts as convenience artifacts, and explain why scripts cannot leave the original shell in the target cwd. README restart docs updated. Validated with `npx tsc --noEmit`.

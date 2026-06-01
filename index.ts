@@ -531,14 +531,11 @@ async function launchInTerminal(scriptFile: string): Promise<void> {
 
 type RestartInfo = { scriptFile: string; latestFile: string; targetCwd: string; sessionFile: string; name?: string };
 
-function restartCommandBlock(targetCwd: string, sessionFile: string, name?: string): string[] {
+function restartCommandBlock(targetCwd: string): string[] {
 	return [
-		"Copy-paste restart command:",
-		"```bash",
+		"Run:",
 		`cd ${shellQuote(targetCwd)}`,
-		`pi ${name ? `--name ${shellQuote(name)} ` : ""}--session ${shellQuote(sessionFile)}`,
-		"```",
-		"Running the cd + pi command directly leaves your shell in the target cwd after Pi exits; executing latest.sh runs in a child shell and cannot change the original shell cwd.",
+		"pi -c",
 	];
 }
 
@@ -1107,7 +1104,7 @@ export default function (pi: ExtensionAPI) {
 					`Relocated session written with ${replacements} direct path replacement${replacements === 1 ? "" : "s"}:`,
 					destinationFile,
 					"",
-					...restartCommandBlock(restart.targetCwd, restart.sessionFile, restart.name),
+					...restartCommandBlock(restart.targetCwd),
 					"",
 					"Restart script still written for convenience:",
 					restart.scriptFile,
@@ -1167,7 +1164,7 @@ export default function (pi: ExtensionAPI) {
 					failures.push(`${shortPath(file)}: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			}
-			ctx.ui.notify(["Repo relocation complete", "", `Repo moved: ${sourceCwd} -> ${targetCwd}`, `Session records written: ${ok}`, `Session failures: ${failed}`, `Total direct replacements: ${replacements}`, "Original session files were not deleted.", ...(currentRestartTarget ? ["", ...restartCommandBlock(currentRestartTarget.targetCwd, currentRestartTarget.sessionFile, currentRestartTarget.name), "", "No latest.sh restart script was updated by /relocate-repo for this repo move."] : []), ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
+			ctx.ui.notify(["Repo relocation complete", "", `Repo moved: ${sourceCwd} -> ${targetCwd}`, `Session records written: ${ok}`, `Session failures: ${failed}`, `Total direct replacements: ${replacements}`, "Original session files were not deleted.", ...(currentRestartTarget ? ["", ...restartCommandBlock(currentRestartTarget.targetCwd), "", "No latest.sh restart script was updated by /relocate-repo for this repo move."] : []), ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
 		},
 	});
 
@@ -1314,7 +1311,7 @@ export default function (pi: ExtensionAPI) {
 				`Total direct replacements: ${replacements}`,
 				"Original files were not deleted.",
 				...(mode === "move" ? ["Source observations were marked superseded/deletion-review candidates in the canonical store."] : ["Branch mode: source observations remain active."]),
-				...(restart ? ["", ...restartCommandBlock(restart.targetCwd, restart.sessionFile, restart.name), "", "Restart script still written for convenience:", restart.scriptFile, "Run script with:", `bash ${shellQuote(restart.latestFile)}`] : []),
+				...(restart ? ["", ...restartCommandBlock(restart.targetCwd), "", "Restart script still written for convenience:", restart.scriptFile, "Run script with:", `bash ${shellQuote(restart.latestFile)}`] : []),
 				...(launch ? ["", launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []),
 				...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : []),
 			].join("\n"), failed ? "warning" : "info");
