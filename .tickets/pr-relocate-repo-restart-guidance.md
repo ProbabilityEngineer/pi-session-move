@@ -1,6 +1,6 @@
 ---
 id: pr-relocate-repo-restart-guidance
-status: open
+status: closed
 type: bug
 priority: 1
 created: 2026-05-31T19:25:00Z

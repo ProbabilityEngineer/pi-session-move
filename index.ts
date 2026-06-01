@@ -96,7 +96,9 @@ type RelocationRecord = {
 	destinationSessionId?: string;
 	mode?: "move" | "diverge";
 	operationType?: "session_relocation" | "bucket_relocation" | "repo_move" | "repo_root_move" | string;
-	tool?: "pi-relocate" | "pi-move" | string;
+	tool?: "pi-relocate" | "pi-move" | "pi-move-repo" | string;
+	sourceRepo?: string;
+	targetRepo?: string;
 	batchId?: string;
 	inferred?: boolean;
 	confidence?: string;

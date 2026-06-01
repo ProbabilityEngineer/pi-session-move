@@ -1,6 +1,6 @@
 ---
 id: pr-4d3f
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-06-01T18:58:41Z

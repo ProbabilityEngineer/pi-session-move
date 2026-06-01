@@ -1,6 +1,6 @@
 ---
 id: pr-top-level-manifest-fields
-status: open
+status: closed
 type: task
 priority: 2
 created: 2026-06-01T00:00:00Z
