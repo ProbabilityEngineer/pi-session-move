@@ -1199,7 +1199,7 @@ export default function (pi: ExtensionAPI) {
 				`Current cwd: ${shortPath(ctx.cwd)}`,
 				`Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
 				`Current session id: ${currentSessionId}`,
-				`Current lineage name: ${currentName?.name ?? "(unnamed)"}`,
+				`Pinned lineage name: ${currentName?.name ?? "(unnamed)"}`,
 				`Current session tracked: ${currentIndex >= 0 ? `yes (#${currentIndex + 1})` : "no"}`,
 				...movedWarningLines(sessionFile),
 				`Manifest records: ${records.length}`,
@@ -1267,9 +1267,9 @@ export default function (pi: ExtensionAPI) {
 				const sessionManager = ctx.sessionManager as { appendSessionInfo?: (name: string) => string };
 				const sessionNameEntry = typeof sessionManager.appendSessionInfo === "function" ? sessionManager.appendSessionInfo(name) : undefined;
 				ctx.ui.notify([
-					"Session move lineage named",
+					"Session move lineage pinned",
 					"",
-					`Name: ${name}`,
+					`Pinned lineage name: ${name}`,
 					...(sessionNameEntry ? [`Pi session display name updated: ${name}`] : ["Pi session display name was not updated; this Pi version does not expose appendSessionInfo to extensions."]),
 					`Root: ${shortPath(root)}`,
 					`Metadata: ${shortPath(lineageNamesFile())}`,
@@ -1284,7 +1284,7 @@ export default function (pi: ExtensionAPI) {
 				`Current cwd: ${shortPath(ctx.cwd)}`,
 				`Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
 				`Current session id: ${ctx.sessionManager.getSessionId()}`,
-				`Lineage name: ${currentName?.name ?? "(unnamed)"}`,
+				`Pinned lineage name: ${currentName?.name ?? "(unnamed)"}`,
 				...movedWarningLines(sessionFile),
 				"",
 				"Current position:",

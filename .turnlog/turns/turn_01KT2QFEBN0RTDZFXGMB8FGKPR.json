@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "turn_01KT2QFEBN0RTDZFXGMB8FGKPR",
+  "session": "sess_01KT28S8XX9GGPMXYDK7NCN89G",
+  "created_at": "2026-06-01T23:14:36.53362Z",
+  "model": null,
+  "summary": "At this point the planned work looks complete. What’s left is operational verification/reload: 1. **Install/reload updat",
+  "verification": [],
+  "attachments": [],
+  "vcs": {
+    "kind": "jj",
+    "jj_change": "nkowoooutqmt",
+    "jj_commit": "cedfaa16df0c",
+    "jj_operation": "249f91668b0a",
+    "git_head": "d148d5807ae5ec8b9508d287242d776b09bfcc05",
+    "git_branch": "main",
+    "dirty": true,
+    "changed_files": [
+      ".turnlog/index.jsonl",
+      ".turnlog/turns/turn_01KT2QEQEZBM297D3MSKW419D7.json",
+      ".turnlog/turns/turn_01KT2QEQEZBM297D3MSKW419D7.md"
+    ]
+  }
+}

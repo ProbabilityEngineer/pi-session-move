@@ -137,13 +137,13 @@ Name the current lineage with:
 /move-lineage --name publish-pi-packages
 ```
 
-Lineage names are metadata about the chain/family, not individual session names. They are stored separately from the append-only session-move manifest in:
+Lineage names are pinned metadata about the chain/family, not raw proof of identity and not merely an individual session filename. They are stored separately from the append-only session-move manifest in:
 
 ```text
 ~/.pi/agent/session-move/manifests/relocation-lineages.jsonl
 ```
 
-When Pi exposes session naming APIs, `/move-lineage --name` also appends the name to the current session display info.
+When Pi exposes session naming APIs, `/move-lineage --name` also appends the pinned lineage name to the current session display info so the durable lineage label and Pi's current-session display name stay synced.
 
 ## Legacy evidence copy
 
