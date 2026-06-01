@@ -20,8 +20,25 @@ function normalizeDraggedPath(value: string): string {
 	return value.replace(/\\(.)/g, "$1");
 }
 
+function expandLeadingTilde(value: string): string {
+	if (value === "~" || value.startsWith("~/")) {
+		const home = process.env.HOME;
+		if (!home) throw new Error("Cannot expand ~ because HOME is not set.");
+		return value === "~" ? home : join(home, value.slice(2));
+	}
+	if (/^~[^/]/.test(value)) {
+		throw new Error(`Unsupported tilde path form: ${value}. Use ~/path or an absolute path.`);
+	}
+	return value;
+}
+
 function normalizeDir(value: string): string {
-	return resolve(normalizeDraggedPath(value));
+	return resolve(expandLeadingTilde(normalizeDraggedPath(value)));
+}
+
+function normalizeDirArg(value: string, baseCwd: string): string {
+	const normalized = expandLeadingTilde(normalizeDraggedPath(value));
+	return normalizeDir(isAbsolute(normalized) ? normalized : resolve(baseCwd, normalized));
 }
 
 function sessionBucketName(cwd: string): string {
@@ -986,7 +1003,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const oldCwd = normalizeDir(ctx.cwd);
-			const targetCwd = normalizeDir(isAbsolute(target) ? target : resolve(ctx.cwd, target));
+			const targetCwd = normalizeDirArg(target, ctx.cwd);
 			try {
 				if (!(await ensureTargetDirectory(targetCwd, force, false, ctx.ui.confirm))) return;
 			} catch (error) {
@@ -1102,8 +1119,8 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const sourceArg = source ?? ctx.cwd;
-			const sourceCwd = normalizeDir(isAbsolute(sourceArg) ? sourceArg : resolve(ctx.cwd, sourceArg));
-			const targetCwd = normalizeDir(isAbsolute(target) ? target : resolve(ctx.cwd, target));
+			const sourceCwd = normalizeDirArg(sourceArg, ctx.cwd);
+			const targetCwd = normalizeDirArg(target, ctx.cwd);
 			const files = await sessionFilesInBucket(sourceCwd);
 			const mode = branch ? "branch" : "move";
 			const preview = ["Repo relocation", "", `From: ${sourceCwd}`, `To:   ${targetCwd}`, `Mode: ${mode}`, `Session files: ${files.length}`, ...(dryRun ? ["", "Dry run only; repo and sessions will not be moved."] : [])].filter(Boolean).join("\n");
@@ -1145,8 +1162,8 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /relocate-repos [--dry-run] [--branch] [--force] <old-root> <new-root>", "error");
 				return;
 			}
-			const oldRoot = normalizeDir(isAbsolute(source) ? source : resolve(ctx.cwd, source));
-			const newRoot = normalizeDir(isAbsolute(target) ? target : resolve(ctx.cwd, target));
+			const oldRoot = normalizeDirArg(source, ctx.cwd);
+			const newRoot = normalizeDirArg(target, ctx.cwd);
 			let plans: RepoMovePlan[];
 			try {
 				plans = await repoMovePlans(oldRoot, newRoot);
@@ -1208,7 +1225,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const oldCwd = normalizeDir(ctx.cwd);
-			const targetCwd = normalizeDir(isAbsolute(target) ? target : resolve(ctx.cwd, target));
+			const targetCwd = normalizeDirArg(target, ctx.cwd);
 			try {
 				if (!(await ensureTargetDirectory(targetCwd, force, dryRun, ctx.ui.confirm))) return;
 			} catch (error) {
