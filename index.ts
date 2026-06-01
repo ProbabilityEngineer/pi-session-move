@@ -93,7 +93,7 @@ type RelocationRecord = {
 	replacements: number | null;
 	sourceSessionId?: string;
 	destinationSessionId?: string;
-	mode?: "move" | "branch";
+	mode?: "move" | "diverge";
 	batchId?: string;
 	inferred?: boolean;
 	confidence?: string;
@@ -200,7 +200,7 @@ async function appendStoreRecord(record: RelocationRecord, name?: string): Promi
 		const mode = record.mode ?? "move";
 		const confidence = inferredLegacyMove ? "inferred-from-legacy-manifest" : "authoritative";
 		const edgeId = hashId("edge", record.ts, record.sourceSession, record.destinationSession);
-		upsertEdge.run(edgeId, sourceSessionId, destSessionId, mode === "branch" ? "branch" : "relocation", record.ts, sourceObsId, destObsId, confidence, "pi-relocate", JSON.stringify({ fromCwd: record.fromCwd, toCwd: record.toCwd, replacements: record.replacements, parent: record.parent, sourceSessionId: record.sourceSessionId, destinationSessionId: record.destinationSessionId, mode, batchId: record.batchId, sourceLinesAtEvent: record.sourceLinesAtEvent, sourceBytesAtEvent: record.sourceBytesAtEvent, inferredLegacyMove }));
+		upsertEdge.run(edgeId, sourceSessionId, destSessionId, mode === "diverge" ? "diverge" : "relocation", record.ts, sourceObsId, destObsId, confidence, "pi-relocate", JSON.stringify({ fromCwd: record.fromCwd, toCwd: record.toCwd, replacements: record.replacements, parent: record.parent, sourceSessionId: record.sourceSessionId, destinationSessionId: record.destinationSessionId, mode, batchId: record.batchId, sourceLinesAtEvent: record.sourceLinesAtEvent, sourceBytesAtEvent: record.sourceBytesAtEvent, inferredLegacyMove }));
 		if (record.batchId) upsertBatch.run(record.batchId, "bucket_relocation", record.fromCwd, record.toCwd, record.ts, "pi-relocate", "applied", JSON.stringify({ mode, inferredLegacyMove }));
 		if (mode === "move") {
 			const markReason = inferredLegacyMove ? "legacy relocation manifest record inferred as move; manual review required" : "relocated by pi-relocate move semantics";
@@ -342,7 +342,7 @@ ORDER BY m.timestamp DESC, o.path
 				let reason = "superseded move source with replacement";
 				if (row.sourcePath === currentSession) { category = "unsafe"; reason = "current live session"; }
 				else if (!row.replacementPath) { category = "unsafe"; reason = "missing replacement observation"; }
-				else if (metadata.mode === "branch") { category = "unsafe"; reason = "branch/copy source"; }
+				else if (metadata.mode === "diverge" || metadata.mode === "branch") { category = "unsafe"; reason = "diverged source"; }
 				else if (row.confidence !== "authoritative") { category = "legacy-review"; reason = `legacy/inferred mark (${row.confidence})`; }
 				bySource.set(row.sourcePath, { sourcePath: row.sourcePath, replacementPath: row.replacementPath, timestamp: row.timestamp, confidence: row.confidence, eventLines: metadata.sourceLinesAtEvent, eventBytes: metadata.sourceBytesAtEvent, category, reason });
 			}
@@ -593,7 +593,7 @@ async function sessionFilesInBucket(cwd: string): Promise<string[]> {
 	return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl")).map((entry) => join(dir, entry.name)).sort();
 }
 
-async function relocateSessionFile(sourceFile: string, oldCwd: string, targetCwd: string, mode: "move" | "branch", batchId?: string, name?: string): Promise<{ record: RelocationRecord; replacements: number }> {
+async function relocateSessionFile(sourceFile: string, oldCwd: string, targetCwd: string, mode: "move" | "diverge", batchId?: string, name?: string): Promise<{ record: RelocationRecord; replacements: number }> {
 	const original = await readFile(sourceFile, "utf8");
 	let relocated = replaceAllLiteral(original, oldCwd, targetCwd);
 	relocated = replaceAllLiteral(relocated, oldCwd.replace(/\//g, "\\/"), targetCwd.replace(/\//g, "\\/"));
@@ -670,39 +670,41 @@ function parseWords(args: string): string[] {
 	return words;
 }
 
-function parseArgs(args: string): { target?: string; force: boolean; branch: boolean; dryRun: boolean; launch: boolean; shutdown: boolean } {
+function parseArgs(args: string): { target?: string; force: boolean; diverge: boolean; dryRun: boolean; launch: boolean; shutdown: boolean; verbose: boolean } {
 	let force = false;
-	let branch = false;
+	let diverge = false;
 	let dryRun = false;
 	let launch = false;
 	let shutdown = false;
+	let verbose = false;
 	const positional: string[] = [];
 	for (const value of parseWords(args)) {
 		if (value === "--force" || value === "-f") force = true;
-		else if (value === "--branch" || value === "--copy") branch = true;
+		else if (value === "--diverge") diverge = true;
 		else if (value === "--dry-run" || value === "-n") dryRun = true;
 		else if (value === "--launch") launch = true;
 		else if (value === "--shutdown") shutdown = true;
+		else if (value === "--verbose" || value === "-v") verbose = true;
 		else positional.push(value);
 	}
 
-	return { target: positional.join(" ") || undefined, force, branch, dryRun, launch, shutdown };
+	return { target: positional.join(" ") || undefined, force, diverge, dryRun, launch, shutdown, verbose };
 }
 
-function parseRepoArgs(args: string): { source?: string; target?: string; force: boolean; branch: boolean; dryRun: boolean; usageError: boolean } {
+function parseRepoArgs(args: string): { source?: string; target?: string; force: boolean; diverge: boolean; dryRun: boolean; usageError: boolean } {
 	let force = false;
-	let branch = false;
+	let diverge = false;
 	let dryRun = false;
 	const positional: string[] = [];
 	for (const value of parseWords(args)) {
 		if (value === "--force" || value === "-f") force = true;
-		else if (value === "--branch" || value === "--copy") branch = true;
+		else if (value === "--diverge") diverge = true;
 		else if (value === "--dry-run" || value === "-n") dryRun = true;
 		else positional.push(value);
 	}
-	if (positional.length === 1) return { target: positional[0], force, branch, dryRun, usageError: false };
-	if (positional.length === 2) return { source: positional[0], target: positional[1], force, branch, dryRun, usageError: false };
-	return { force, branch, dryRun, usageError: true };
+	if (positional.length === 1) return { target: positional[0], force, diverge, dryRun, usageError: false };
+	if (positional.length === 2) return { source: positional[0], target: positional[1], force, diverge, dryRun, usageError: false };
+	return { force, diverge, dryRun, usageError: true };
 }
 
 function hasFlag(args: string, flag: string): boolean {
@@ -982,7 +984,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Relocate routing: use relocate status/lineage when checking whether the current Pi session is an older relocated branch or latest lineage leaf.",
 		promptGuidelines: [
 			"Use relocate lineage to answer whether the current session has descendants, is a latest leaf, or should continue from a newer relocated session.",
-			"Relocate status/lineage are read-only; use slash /relocate for the user-confirmed copy operation.",
+			"Relocate status/lineage are read-only; use slash /relocate for the user-confirmed relocation operation.",
 		],
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("status"), Type.Literal("lineage")]),
@@ -997,11 +999,11 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("relocate", {
 		description:
-			"Copy this session to another cwd by replacing old path strings; restart Pi there with --session. Records lineage in relocations.jsonl. No LLM call.",
+			"Relocate this session to another cwd by replacing old path strings; restart Pi there with pi -c. Records lineage in relocations.jsonl. No LLM call. Use --verbose for file/script details.",
 		handler: async (args, ctx) => {
-			const { target, force, branch, launch, shutdown } = parseArgs(args);
+			const { target, force, diverge, launch, shutdown, verbose } = parseArgs(args);
 			if (!target) {
-				ctx.ui.notify("Usage: /relocate [--launch] [--shutdown] [--force] <target-directory>", "error");
+				ctx.ui.notify("Usage: /relocate [--launch] [--shutdown] [--diverge] [--verbose] [--force] <target-directory>", "error");
 				return;
 			}
 
@@ -1032,12 +1034,12 @@ export default function (pi: ExtensionAPI) {
 				const ok = await ctx.ui.confirm(
 					"Relocate session?",
 					[
-						"This will copy the current session JSONL and replace path strings.",
+						"This will write a relocated session JSONL and replace path strings.",
 						"It will not switch the live Pi process.",
 						"",
 						`From: ${oldCwd}`,
 						`To:   ${targetCwd}`,
-						`Mode: ${branch ? "branch/copy (source remains active)" : "move (source marked superseded in store)"}`,
+						`Mode: ${diverge ? "diverge (source remains active)" : "move (source marked superseded in store)"}`,
 					].join("\n"),
 				);
 				if (!ok) return;
@@ -1077,7 +1079,7 @@ export default function (pi: ExtensionAPI) {
 				replacements,
 				sourceSessionId: sessionId,
 				destinationSessionId: sessionId,
-				mode: branch ? "branch" : "move",
+				mode: diverge ? "diverge" : "move",
 				sourceLinesAtEvent: original.split("\n").filter((line) => line.trim()).length,
 				sourceBytesAtEvent: Buffer.byteLength(original),
 			} satisfies RelocationRecord;
@@ -1099,41 +1101,46 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			const command = `bash ${shellQuote(restart.latestFile)}`;
-			ctx.ui.notify(
-				[
-					`Relocated session written with ${replacements} direct path replacement${replacements === 1 ? "" : "s"}:`,
-					destinationFile,
-					"",
-					...restartCommandBlock(restart.targetCwd),
-					"",
-					"Restart script still written for convenience:",
-					restart.scriptFile,
-					"Run script with:",
-					command,
-					"",
-					`Mode: ${branch ? "branch/copy" : "move; source marked superseded in canonical store"}`,
-					...(launch ? ["", launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []),
-					...(name ? ["", `Session name preserved in restart script: ${name}`] : []),
-					...(storeWarning ? ["", storeWarning] : []),
-				].join("\n"),
-				"info",
-			);
+			const lines = verbose ? [
+				`Relocated session written with ${replacements} path-string rewrite${replacements === 1 ? "" : "s"}:`,
+				destinationFile,
+				"",
+				...restartCommandBlock(restart.targetCwd),
+				"",
+				"Restart script still written for convenience:",
+				restart.scriptFile,
+				"Run script with:",
+				command,
+				"",
+				`mode: ${diverge ? "diverge" : "move"}`,
+				...(name ? [`session name: ${name}`] : []),
+				...(launch ? ["", launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []),
+				...(storeWarning ? ["", storeWarning] : []),
+			] : [
+				`Relocated → ${targetCwd}`,
+				"",
+				...restartCommandBlock(targetCwd),
+				"",
+				[`mode: ${diverge ? "diverge" : "move"}`, ...(name ? [`session name: ${name}`] : [])].join(" · "),
+				...(launch || storeWarning ? ["", ...(launch ? [launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []), ...(storeWarning ? [storeWarning] : [])] : []),
+			];
+			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});
 
 	pi.registerCommand("relocate-repo", {
 		description: "Move a repo directory on disk and relocate all sessions in its old cwd bucket. Use --dry-run first. With one path, source defaults to current cwd.",
 		handler: async (args, ctx) => {
-			const { source, target, force, branch, dryRun, usageError } = parseRepoArgs(args);
+			const { source, target, force, diverge, dryRun, usageError } = parseRepoArgs(args);
 			if (usageError || !target) {
-				ctx.ui.notify("Usage: /relocate-repo [--dry-run] [--branch] [--force] <target-repo> OR /relocate-repo [flags] <source-repo> <target-repo>", "error");
+				ctx.ui.notify("Usage: /relocate-repo [--dry-run] [--diverge] [--force] <target-repo> OR /relocate-repo [flags] <source-repo> <target-repo>", "error");
 				return;
 			}
 			const sourceArg = source ?? ctx.cwd;
 			const sourceCwd = normalizeDirArg(sourceArg, ctx.cwd);
 			const targetCwd = normalizeDirArg(target, ctx.cwd);
 			const files = await sessionFilesInBucket(sourceCwd);
-			const mode = branch ? "branch" : "move";
+			const mode = diverge ? "diverge" : "move";
 			const preview = ["Repo relocation", "", `From: ${sourceCwd}`, `To:   ${targetCwd}`, `Mode: ${mode}`, `Session files: ${files.length}`, ...(dryRun ? ["", "Dry run only; repo and sessions will not be moved."] : [])].filter(Boolean).join("\n");
 			if (dryRun) {
 				ctx.ui.notify(preview, "info");
@@ -1171,9 +1178,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("relocate-repos", {
 		description: "Move child repo directories from one root to another and relocate each repo session bucket. Use --dry-run first.",
 		handler: async (args, ctx) => {
-			const { source, target, force, branch, dryRun, usageError } = parseRepoArgs(args);
+			const { source, target, force, diverge, dryRun, usageError } = parseRepoArgs(args);
 			if (usageError || !source || !target) {
-				ctx.ui.notify("Usage: /relocate-repos [--dry-run] [--branch] [--force] <old-root> <new-root>", "error");
+				ctx.ui.notify("Usage: /relocate-repos [--dry-run] [--diverge] [--force] <old-root> <new-root>", "error");
 				return;
 			}
 			const oldRoot = normalizeDirArg(source, ctx.cwd);
@@ -1187,7 +1194,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			const ready = plans.filter((plan) => plan.status === "ready");
 			const skipped = plans.filter((plan) => plan.status !== "ready");
-			const mode = branch ? "branch" : "move";
+			const mode = diverge ? "diverge" : "move";
 			const preview = ["Repo root relocation", "", `From root: ${oldRoot}`, `To root:   ${newRoot}`, `Mode: ${mode}`, `Ready repos: ${ready.length}`, `Skipped: ${skipped.length}`, "", ...ready.slice(0, 20).map((plan) => `- ${basename(plan.source)} (${plan.sessionCount} sessions)`), ...(ready.length > 20 ? [`- ... ${ready.length - 20} more ready`] : []), ...(skipped.length ? ["", "Skipped:", ...skipped.slice(0, 10).map((plan) => `- ${basename(plan.source)} (${plan.status})`)] : [])].join("\n");
 			if (dryRun) {
 				ctx.ui.notify(`${preview}\n\nDry run only; no repos or sessions were moved.`, "info");
@@ -1233,9 +1240,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("relocate-bucket", {
 		description: "Relocate all session files in the current cwd bucket to another cwd. Originals are not deleted; move mode marks them superseded in the store. Use --dry-run first.",
 		handler: async (args, ctx) => {
-			const { target, force, branch, dryRun, launch, shutdown } = parseArgs(args);
+			const { target, force, diverge, dryRun, launch, shutdown } = parseArgs(args);
 			if (!target) {
-				ctx.ui.notify("Usage: /relocate-bucket [--dry-run] [--launch] [--shutdown] [--branch] [--force] <target-directory>", "error");
+				ctx.ui.notify("Usage: /relocate-bucket [--dry-run] [--launch] [--shutdown] [--diverge] [--force] <target-directory>", "error");
 				return;
 			}
 			const oldCwd = normalizeDir(ctx.cwd);
@@ -1251,13 +1258,13 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`No session files found in current bucket: ${sessionBucketName(oldCwd)}`, "warning");
 				return;
 			}
-			const mode = branch ? "branch" : "move";
+			const mode = diverge ? "diverge" : "move";
 			const preview = [
 				"Bucket relocation",
 				"",
 				`From: ${oldCwd}`,
 				`To:   ${targetCwd}`,
-				`Mode: ${mode === "branch" ? "branch/copy" : "move; source observations marked superseded in store"}`,
+				`Mode: ${mode === "diverge" ? "diverge; source remains active" : "move; source observations marked superseded in store"}`,
 				`Sessions: ${files.length}`,
 				"",
 				...files.slice(0, 20).map((file) => `- ${shortPath(file)}`),
@@ -1310,7 +1317,7 @@ export default function (pi: ExtensionAPI) {
 				`Failed: ${failed}`,
 				`Total direct replacements: ${replacements}`,
 				"Original files were not deleted.",
-				...(mode === "move" ? ["Source observations were marked superseded/deletion-review candidates in the canonical store."] : ["Branch mode: source observations remain active."]),
+				...(mode === "move" ? ["Source observations were marked superseded/deletion-review candidates in the canonical store."] : ["Diverge mode: source observations remain active."]),
 				...(restart ? ["", ...restartCommandBlock(restart.targetCwd), "", "Restart script still written for convenience:", restart.scriptFile, "Run script with:", `bash ${shellQuote(restart.latestFile)}`] : []),
 				...(launch ? ["", launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []),
 				...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : []),

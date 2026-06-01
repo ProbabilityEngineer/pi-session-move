@@ -17,11 +17,11 @@ pi -e ./index.ts
 ## Commands
 
 ```text
-/relocate [--launch] [--shutdown] [--branch] [--force] <target-directory>
-/relocate-bucket [--dry-run] [--launch] [--shutdown] [--branch] [--force] <target-directory>
-/relocate-repo [--dry-run] [--branch] [--force] <target-repo>
-/relocate-repo [--dry-run] [--branch] [--force] <source-repo> <target-repo>
-/relocate-repos [--dry-run] [--branch] [--force] <old-root> <new-root>
+/relocate [--launch] [--shutdown] [--diverge] [--verbose] [--force] <target-directory>
+/relocate-bucket [--dry-run] [--launch] [--shutdown] [--diverge] [--force] <target-directory>
+/relocate-repo [--dry-run] [--diverge] [--force] <target-repo>
+/relocate-repo [--dry-run] [--diverge] [--force] <source-repo> <target-repo>
+/relocate-repos [--dry-run] [--diverge] [--force] <old-root> <new-root>
 /relocate-prune [--dry-run] [--stage] [--duplicates] [--force]
 /relocate-store-replay [--crawl-sessions]
 /relocate-status [--all]
@@ -39,11 +39,11 @@ pi -e ./index.ts
 - Use `/relocate-prune --dry-run` to preview cleanup of superseded source session files.
 - Use `/relocate-store-replay --crawl-sessions` after restoring files or rebuilding the store.
 
-## Move vs branch
+## Move vs diverge
 
 Default mode is move semantics: destination becomes active and the old source observation is marked `superseded` and `deletion_candidate` in the canonical store. The source JSONL is not deleted during relocation.
 
-Use `--branch`/`--copy` when both source and destination should remain active. Branch records do not become prune candidates.
+Use `--diverge` when both source and destination should remain active. Diverge records do not become prune candidates.
 
 ## Restart and launch
 
@@ -98,7 +98,7 @@ Pruning is separate from relocation.
 /relocate-prune
 ```
 
-Safe candidates require a replacement file, must not be the current live session, must not be branch/copy records, and must pass line/byte checkpoint checks when available.
+Safe candidates require a replacement file, must not be the current live session, must not be diverge records, and must pass line/byte checkpoint checks when available.
 
 `--stage` moves candidates to:
 
