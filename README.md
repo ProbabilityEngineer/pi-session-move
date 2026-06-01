@@ -2,7 +2,7 @@
 
 Pi extension for moving Pi session context when projects move. It can relocate the current session or whole session buckets. It does **not** invoke the LLM.
 
-Filesystem repo moves now live in `pi-move` (`/move <target>`).
+Filesystem repo moves now live in `pi-repo-move` (`/repo-move <target>`).
 
 ## Install
 
@@ -32,7 +32,7 @@ pi -e ./index.ts
 
 - Use `/relocate` to copy only the current live session to another cwd bucket and write a restart script.
 - Use `/relocate-bucket` when the repo/cwd already moved and all sessions in the old bucket should point at the new cwd.
-- Use `pi-move`'s `/move <target>` to move the current repo directory on disk and relocate its live session.
+- Use `pi-repo-move`'s `/repo-move <target>` to move the current repo directory on disk and relocate its live session.
 - Use `/relocate-prune --dry-run` to preview cleanup of superseded source session files.
 - Use `/relocate-store-replay --crawl-sessions` after restoring files or rebuilding the store.
 

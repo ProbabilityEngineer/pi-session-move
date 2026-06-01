@@ -7,7 +7,7 @@ created: 2026-06-01T00:00:00Z
 ---
 # Tolerate top-level operation/tool fields in relocation manifests
 
-Other suite tools such as `pi-move` may append relocation records with first-class fields like `operationType`, `tool`, `sourceRepo`, and `targetRepo`.
+Other suite tools such as `pi-repo-move` may append relocation records with first-class fields like `operationType`, `tool`, `sourceRepo`, and `targetRepo`.
 
 ## Acceptance Criteria
 
