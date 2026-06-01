@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { chmod, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
@@ -70,9 +71,9 @@ function cwdFromSessionBucket(path: string): string | undefined {
 function uniqueRelocatedName(originalFile: string): string {
 	const parsed = basename(originalFile).replace(/\.jsonl$/i, "");
 	const originalSessionId = parsed.split("_relocated_")[0] || "session";
-	const safeSessionId = originalSessionId.slice(0, 96);
-	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-	return `${safeSessionId}_relocated_${stamp}.jsonl`;
+	const safeSessionId = originalSessionId.slice(0, 80);
+	const suffix = createHash("sha256").update(`${originalFile}\0${Date.now()}\0${Math.random()}`).digest("hex").slice(0, 12);
+	return `${safeSessionId}_relocated_${suffix}.jsonl`;
 }
 
 function manifestFile(): string {

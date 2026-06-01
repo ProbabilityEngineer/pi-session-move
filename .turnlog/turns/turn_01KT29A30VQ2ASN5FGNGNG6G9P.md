@@ -1,0 +1,29 @@
+# Turn turn_01KT29A30VQ2ASN5FGNGNG6G9P
+
+Session: sess_01KT28S8XX9GGPMXYDK7NCN89G  
+Model: unknown  
+Summary: Aligned and pushed pi-relocate. Committed current pi-relocate working copy as 'Track pi-move bucket relocation ticket', moved main to the completed change, created an empty child @, exported to Git, attached HEAD to main, reset mixed, pushed origin/main, and verified clean jj/git status with @ empty and @- on main/main@origin.  
+Created: 2026-06-01T19:07:01.019244Z
+
+## Verification
+
+- none
+
+## Attachments
+
+- none
+
+## VCS
+
+```json
+{
+  "kind": "jj",
+  "jj_change": "lltprmrypkmm",
+  "jj_commit": "994e94670f08",
+  "jj_operation": "addbe2617937",
+  "git_head": "0d9c22118bc3f28422281ffcbc61cdb442e729bc",
+  "git_branch": "main",
+  "dirty": false,
+  "changed_files": []
+}
+```
