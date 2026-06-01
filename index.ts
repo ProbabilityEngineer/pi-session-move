@@ -94,6 +94,8 @@ type RelocationRecord = {
 	sourceSessionId?: string;
 	destinationSessionId?: string;
 	mode?: "move" | "diverge";
+	operationType?: "session_relocation" | "bucket_relocation" | "repo_move" | "repo_root_move" | string;
+	tool?: "pi-relocate" | "pi-move" | string;
 	batchId?: string;
 	inferred?: boolean;
 	confidence?: string;
@@ -603,7 +605,7 @@ async function relocateSessionFile(sourceFile: string, oldCwd: string, targetCwd
 	const destinationFile = join(destinationDir, uniqueRelocatedName(sourceFile));
 	await writeFile(destinationFile, relocated, { encoding: "utf8", flag: "wx" });
 	const sessionId = parseSessionFilename(sourceFile).providerSessionId;
-	const record = { ts: new Date().toISOString(), fromCwd: oldCwd, toCwd: targetCwd, sourceSession: sourceFile, destinationSession: destinationFile, parent: sourceFile, replacements, sourceSessionId: sessionId, destinationSessionId: sessionId, mode, batchId, sourceLinesAtEvent: original.split("\n").filter((line) => line.trim()).length, sourceBytesAtEvent: Buffer.byteLength(original) } satisfies RelocationRecord;
+	const record = { ts: new Date().toISOString(), fromCwd: oldCwd, toCwd: targetCwd, sourceSession: sourceFile, destinationSession: destinationFile, parent: sourceFile, replacements, sourceSessionId: sessionId, destinationSessionId: sessionId, mode, operationType: batchId ? "bucket_relocation" : "session_relocation", tool: "pi-relocate", batchId, sourceLinesAtEvent: original.split("\n").filter((line) => line.trim()).length, sourceBytesAtEvent: Buffer.byteLength(original) } satisfies RelocationRecord;
 	await appendManifest(record);
 	await appendStoreRecord(record, name);
 	return { record, replacements };
@@ -689,22 +691,6 @@ function parseArgs(args: string): { target?: string; force: boolean; diverge: bo
 	}
 
 	return { target: positional.join(" ") || undefined, force, diverge, dryRun, launch, shutdown, verbose };
-}
-
-function parseRepoArgs(args: string): { source?: string; target?: string; force: boolean; diverge: boolean; dryRun: boolean; usageError: boolean } {
-	let force = false;
-	let diverge = false;
-	let dryRun = false;
-	const positional: string[] = [];
-	for (const value of parseWords(args)) {
-		if (value === "--force" || value === "-f") force = true;
-		else if (value === "--diverge") diverge = true;
-		else if (value === "--dry-run" || value === "-n") dryRun = true;
-		else positional.push(value);
-	}
-	if (positional.length === 1) return { target: positional[0], force, diverge, dryRun, usageError: false };
-	if (positional.length === 2) return { source: positional[0], target: positional[1], force, diverge, dryRun, usageError: false };
-	return { force, diverge, dryRun, usageError: true };
 }
 
 function hasFlag(args: string, flag: string): boolean {
@@ -823,42 +809,6 @@ async function ensureTargetDirectory(targetCwd: string, force: boolean, dryRun: 
 	}
 	await mkdir(targetCwd, { recursive: true });
 	return true;
-}
-
-async function moveRepoDirectory(sourceCwd: string, targetCwd: string, force: boolean, dryRun: boolean, confirm: (title: string, message: string) => Promise<boolean>): Promise<"moved" | "dry-run" | "skipped"> {
-	const sourceStat = await stat(sourceCwd).catch(() => undefined);
-	if (!sourceStat?.isDirectory()) throw new Error(`Source repo directory is not a directory: ${sourceCwd}`);
-	const targetStat = await stat(targetCwd).catch(() => undefined);
-	if (targetStat) throw new Error(`Target repo path already exists: ${targetCwd}`);
-	if (dryRun) return "dry-run";
-	await mkdir(dirname(targetCwd), { recursive: true });
-	if (!force) {
-		const ok = await confirm("Move repo directory?", [`This will move the repo directory on disk and then relocate its Pi session bucket.`, "", `From: ${sourceCwd}`, `To:   ${targetCwd}`, "", "Original session files are not deleted."].join("\n"));
-		if (!ok) return "skipped";
-	}
-	await rename(sourceCwd, targetCwd);
-	return "moved";
-}
-
-async function isRepoDir(path: string): Promise<boolean> {
-	return (await stat(join(path, ".git")).then(() => true, () => false)) || (await stat(join(path, ".jj")).then(() => true, () => false));
-}
-
-type RepoMovePlan = { source: string; target: string; sessionCount: number; status: "ready" | "target-exists" | "no-sessions" };
-
-async function repoMovePlans(oldRoot: string, newRoot: string): Promise<RepoMovePlan[]> {
-	const entries = await readdir(oldRoot, { withFileTypes: true });
-	const plans: RepoMovePlan[] = [];
-	for (const entry of entries) {
-		if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-		const source = join(oldRoot, entry.name);
-		if (!(await isRepoDir(source))) continue;
-		const target = join(newRoot, entry.name);
-		const sessionCount = (await sessionFilesInBucket(source)).length;
-		const targetExists = await stat(target).then(() => true, () => false);
-		plans.push({ source, target, sessionCount, status: targetExists ? "target-exists" : sessionCount ? "ready" : "no-sessions" });
-	}
-	return plans.sort((a, b) => a.source.localeCompare(b.source));
 }
 
 function formatLeaf(label: string, record: RelocationRecord | undefined, files = false): string[] {
@@ -1080,6 +1030,8 @@ export default function (pi: ExtensionAPI) {
 				sourceSessionId: sessionId,
 				destinationSessionId: sessionId,
 				mode: diverge ? "diverge" : "move",
+				operationType: "session_relocation",
+				tool: "pi-relocate",
 				sourceLinesAtEvent: original.split("\n").filter((line) => line.trim()).length,
 				sourceBytesAtEvent: Buffer.byteLength(original),
 			} satisfies RelocationRecord;
@@ -1125,115 +1077,6 @@ export default function (pi: ExtensionAPI) {
 				...(launch || storeWarning ? ["", ...(launch ? [launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []), ...(storeWarning ? [storeWarning] : [])] : []),
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
-		},
-	});
-
-	pi.registerCommand("relocate-repo", {
-		description: "Move a repo directory on disk and relocate all sessions in its old cwd bucket. Use --dry-run first. With one path, source defaults to current cwd.",
-		handler: async (args, ctx) => {
-			const { source, target, force, diverge, dryRun, usageError } = parseRepoArgs(args);
-			if (usageError || !target) {
-				ctx.ui.notify("Usage: /relocate-repo [--dry-run] [--diverge] [--force] <target-repo> OR /relocate-repo [flags] <source-repo> <target-repo>", "error");
-				return;
-			}
-			const sourceArg = source ?? ctx.cwd;
-			const sourceCwd = normalizeDirArg(sourceArg, ctx.cwd);
-			const targetCwd = normalizeDirArg(target, ctx.cwd);
-			const files = await sessionFilesInBucket(sourceCwd);
-			const mode = diverge ? "diverge" : "move";
-			const preview = ["Repo relocation", "", `From: ${sourceCwd}`, `To:   ${targetCwd}`, `Mode: ${mode}`, `Session files: ${files.length}`, ...(dryRun ? ["", "Dry run only; repo and sessions will not be moved."] : [])].filter(Boolean).join("\n");
-			if (dryRun) {
-				ctx.ui.notify(preview, "info");
-				return;
-			}
-			try {
-				const moved = await moveRepoDirectory(sourceCwd, targetCwd, force, false, ctx.ui.confirm);
-				if (moved === "skipped") return;
-			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-				return;
-			}
-			const batchId = hashId("batch", new Date().toISOString(), sourceCwd, targetCwd, String(files.length));
-			let ok = 0;
-			let failed = 0;
-			let replacements = 0;
-			let currentRestartTarget: { targetCwd: string; sessionFile: string; name?: string } | undefined;
-			const currentSessionFile = ctx.sessionManager?.getSessionFile?.();
-			const failures: string[] = [];
-			for (const file of files) {
-				try {
-					const result = await relocateSessionFile(file, sourceCwd, targetCwd, mode, batchId, displayName(ctx));
-					ok++;
-					replacements += result.replacements;
-					if (file === currentSessionFile) currentRestartTarget = { targetCwd, sessionFile: result.record.destinationSession, name: displayName(ctx) };
-				} catch (error) {
-					failed++;
-					failures.push(`${shortPath(file)}: ${error instanceof Error ? error.message : String(error)}`);
-				}
-			}
-			ctx.ui.notify(["Repo relocation complete", "", `Repo moved: ${sourceCwd} -> ${targetCwd}`, `Session records written: ${ok}`, `Session failures: ${failed}`, `Total direct replacements: ${replacements}`, "Original session files were not deleted.", ...(currentRestartTarget ? ["", ...restartCommandBlock(currentRestartTarget.targetCwd), "", "No latest.sh restart script was updated by /relocate-repo for this repo move."] : []), ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
-		},
-	});
-
-	pi.registerCommand("relocate-repos", {
-		description: "Move child repo directories from one root to another and relocate each repo session bucket. Use --dry-run first.",
-		handler: async (args, ctx) => {
-			const { source, target, force, diverge, dryRun, usageError } = parseRepoArgs(args);
-			if (usageError || !source || !target) {
-				ctx.ui.notify("Usage: /relocate-repos [--dry-run] [--diverge] [--force] <old-root> <new-root>", "error");
-				return;
-			}
-			const oldRoot = normalizeDirArg(source, ctx.cwd);
-			const newRoot = normalizeDirArg(target, ctx.cwd);
-			let plans: RepoMovePlan[];
-			try {
-				plans = await repoMovePlans(oldRoot, newRoot);
-			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-				return;
-			}
-			const ready = plans.filter((plan) => plan.status === "ready");
-			const skipped = plans.filter((plan) => plan.status !== "ready");
-			const mode = diverge ? "diverge" : "move";
-			const preview = ["Repo root relocation", "", `From root: ${oldRoot}`, `To root:   ${newRoot}`, `Mode: ${mode}`, `Ready repos: ${ready.length}`, `Skipped: ${skipped.length}`, "", ...ready.slice(0, 20).map((plan) => `- ${basename(plan.source)} (${plan.sessionCount} sessions)`), ...(ready.length > 20 ? [`- ... ${ready.length - 20} more ready`] : []), ...(skipped.length ? ["", "Skipped:", ...skipped.slice(0, 10).map((plan) => `- ${basename(plan.source)} (${plan.status})`)] : [])].join("\n");
-			if (dryRun) {
-				ctx.ui.notify(`${preview}\n\nDry run only; no repos or sessions were moved.`, "info");
-				return;
-			}
-			if (!ready.length) {
-				ctx.ui.notify(`${preview}\n\nNo ready repos to move.`, "info");
-				return;
-			}
-			if (!force) {
-				const ok = await ctx.ui.confirm("Move repo root children?", `${preview}\n\nThis moves ready repo directories and relocates their session buckets. Original session files are not deleted.`);
-				if (!ok) return;
-			}
-			await mkdir(newRoot, { recursive: true });
-			let reposMoved = 0;
-			let sessionsWritten = 0;
-			let failed = 0;
-			const failures: string[] = [];
-			const rootBatchId = hashId("batch", new Date().toISOString(), oldRoot, newRoot, String(ready.length));
-			for (const plan of ready) {
-				try {
-					await rename(plan.source, plan.target);
-					reposMoved++;
-					const childBatchId = hashId("batch", rootBatchId, plan.source, plan.target);
-					for (const file of await sessionFilesInBucket(plan.source)) {
-						try {
-							await relocateSessionFile(file, plan.source, plan.target, mode, childBatchId, displayName(ctx));
-							sessionsWritten++;
-						} catch (error) {
-							failed++;
-							failures.push(`${shortPath(file)}: ${error instanceof Error ? error.message : String(error)}`);
-						}
-					}
-				} catch (error) {
-					failed++;
-					failures.push(`${shortPath(plan.source)}: ${error instanceof Error ? error.message : String(error)}`);
-				}
-			}
-			ctx.ui.notify(["Repo root relocation complete", "", `Root batch: ${rootBatchId}`, `Repos moved: ${reposMoved}`, `Session records written: ${sessionsWritten}`, `Failures: ${failed}`, `Skipped before move: ${skipped.length}`, "Original session files were not deleted.", ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
 		},
 	});
 
