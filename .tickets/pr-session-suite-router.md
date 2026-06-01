@@ -21,3 +21,7 @@ Reduce slash command confusion by separating session relocation from actual repo
 - Actual filesystem repo move commands move to/are aliased by `pi-session-repo-move`.
 - Existing `/relocate*` commands remain compatibility aliases during migration.
 - Docs emphasize checking `~/.pi/agent/relocations/latest.sh` before restart.
+
+## Boundary note
+
+Session relocation commands should move toward `pi-session-relocate`; filesystem repo move commands should move toward `pi-session-repo-move`; canonical store building remains `agent-session-store`/`pi-session-store`; visualization remains `pi-session-graph`.

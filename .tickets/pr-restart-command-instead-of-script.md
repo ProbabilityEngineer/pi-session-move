@@ -21,3 +21,7 @@ pi --session '<session-file>'
 - Explain that running this directly leaves the shell in the target cwd after Pi exits, unlike executing a separate script from an old cwd.
 - Keep script generation for users who prefer it.
 - Consider a `--no-script` or config option later, but do not remove existing script support.
+
+## Boundary note
+
+This ticket only changes restart UX. It should not remove raw manifest writes or canonical store replay responsibilities.

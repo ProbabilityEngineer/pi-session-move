@@ -18,3 +18,7 @@ Clarify why executing a restart script cannot permanently change the parent term
   - sourcing shell functions/scripts
   - launching a new Terminal at target cwd
 - Warn that `exec pi` in a script starts Pi in the script cwd but does not change the original shell after Pi exits.
+
+## Boundary note
+
+This is documentation for shell/process behavior. It should not be coupled to graph rendering or canonical store inference.

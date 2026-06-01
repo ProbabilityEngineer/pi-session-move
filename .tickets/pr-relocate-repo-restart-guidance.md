@@ -17,3 +17,7 @@ created: 2026-05-31T19:25:00Z
 - Clearly state whether `latest.sh` was written/updated.
 - If `latest.sh` is not updated by repo moves, say so and do not imply it is current.
 - Include the standard reminder to inspect any generated script before running.
+
+## Boundary note
+
+This is relocate UX work. It should print restart/cd commands and accurately report script behavior. Canonical graph/store normalization belongs in `agent-session-store`; rendering belongs in `pi-session-graph`.
