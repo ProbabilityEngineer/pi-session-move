@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "turn_01KT2962HMSCW73PEEND26V148",
+  "session": "sess_01KT28S8XX9GGPMXYDK7NCN89G",
+  "created_at": "2026-06-01T19:04:49.460232Z",
+  "model": null,
+  "summary": "Committed and pushed pi-turnlog ticket updates. Described jj change as 'Track turnlog auto-record workflow tickets', moved main to the completed change, created an empty child working copy, exported to Git, attached Git HEAD to main, reset mixed, pushed origin/main, and verified clean jj/git status with @ empty and @- on main/main@origin.",
+  "verification": [],
+  "attachments": [],
+  "vcs": {
+    "kind": "jj",
+    "jj_change": "mymlvprwvyox",
+    "jj_commit": "e34fcec84798",
+    "jj_operation": "69e99221d796",
+    "git_head": "280bc948e0122dfc78956bba03e603d449514657",
+    "git_branch": null,
+    "dirty": true,
+    "changed_files": [
+      ".tickets/pr-4d3f.md",
+      ".turnlog/current-session",
+      ".turnlog/index.jsonl",
+      ".turnlog/sessions/sess_01KT28S8XX9GGPMXYDK7NCN89G.json",
+      ".turnlog/sessions/sess_01KT28S8XX9GGPMXYDK7NCN89G.md",
+      ".turnlog/turns/turn_01KT28SBYQN9NRNJ94Z7J0X2X5.json",
+      ".turnlog/turns/turn_01KT28SBYQN9NRNJ94Z7J0X2X5.md",
+      ".turnlog/turns/turn_01KT2928JHVF3MF0FP8AXR7HBQ.json",
+      ".turnlog/turns/turn_01KT2928JHVF3MF0FP8AXR7HBQ.md"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "turn_01KT28SBYQN9NRNJ94Z7J0X2X5",
+  "session": "sess_01KT28S8XX9GGPMXYDK7NCN89G",
+  "created_at": "2026-06-01T18:57:53.111741Z",
+  "model": null,
+  "summary": "Prior completed turn before turnlog init: in pi-relocate, removed /relocate-repo and /relocate-repos, documented that filesystem moves live in pi-move /move <target>, added top-level operationType/tool fields to relocation records, validated with npx tsc --noEmit, closed related tickets, and left @ as empty child on top of completed main change.",
+  "verification": [],
+  "attachments": [],
+  "vcs": {
+    "kind": "jj",
+    "jj_change": "mymlvprwvyox",
+    "jj_commit": "42e2ba7a9342",
+    "jj_operation": "4eb8440f2c26",
+    "git_head": "280bc948e0122dfc78956bba03e603d449514657",
+    "git_branch": null,
+    "dirty": true,
+    "changed_files": [
+      ".turnlog/current-session",
+      ".turnlog/index.jsonl",
+      ".turnlog/sessions/sess_01KT28S8XX9GGPMXYDK7NCN89G.json",
+      ".turnlog/sessions/sess_01KT28S8XX9GGPMXYDK7NCN89G.md"
+    ]
+  }
+}
