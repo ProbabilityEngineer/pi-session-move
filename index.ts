@@ -1445,7 +1445,16 @@ export default function (pi: ExtensionAPI) {
 				}
 				const now = new Date().toISOString();
 				await appendLineageName({ type: "lineage_named", root, name, currentSession: sessionFile, sessionId: ctx.sessionManager.getSessionId(), created: now, updated: now, source: "pi-relocate" });
-				ctx.ui.notify(["Relocation lineage named", "", `Name: ${name}`, `Root: ${shortPath(root)}`, `Metadata: ${shortPath(lineageNamesFile())}`].join("\n"), "info");
+				const sessionManager = ctx.sessionManager as { appendSessionInfo?: (name: string) => string };
+				const sessionNameEntry = typeof sessionManager.appendSessionInfo === "function" ? sessionManager.appendSessionInfo(name) : undefined;
+				ctx.ui.notify([
+					"Relocation lineage named",
+					"",
+					`Name: ${name}`,
+					...(sessionNameEntry ? [`Pi session display name updated: ${name}`] : ["Pi session display name was not updated; this Pi version does not expose appendSessionInfo to extensions."]),
+					`Root: ${shortPath(root)}`,
+					`Metadata: ${shortPath(lineageNamesFile())}`,
+				].join("\n"), "info");
 				return;
 			}
 			const currentName = latestLineageName(lineageNames, root, sessionFile);
