@@ -1,6 +1,6 @@
 ---
 id: pr-preserved-branch-status
-status: open
+status: closed
 type: feature
 priority: 1
 created: 2026-06-01T15:55:00Z
@@ -18,3 +18,8 @@ links:
 - Display the preserved branch label, e.g. `Ariadne branch`, reason, and provenance.
 - Do not mutate raw session JSONLs or raw relocation manifests.
 - Prune/recovery guidance says preserved branches are skipped unless explicitly forced.
+
+
+## Closure
+
+Implemented preserve mark handling in relocation status/lineage output. `preserve` and `intentional_branch` marks now override normal superseded/deletion-candidate warnings for display and unavailable-session calculations, show branch label/reason/provenance, and state that raw session files should be preserved unless explicitly forced. Validated with `npx tsc --noEmit`.

@@ -112,6 +112,11 @@ function hashId(prefix: string, ...parts: (string | undefined)[]) {
 	return `${prefix}_${parts.filter(Boolean).join("\u0000").replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 48)}_${Math.abs(parts.join("\u0000").split("").reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0)).toString(16)}`;
 }
 
+function parseJson<T>(value: string | undefined, fallback: T): T {
+	if (!value) return fallback;
+	try { return JSON.parse(value) as T; } catch { return fallback; }
+}
+
 function sessionFileId(path: string) {
 	return hashId("session", path);
 }
@@ -257,7 +262,7 @@ function storeFile(): string {
 	return join(defaultAgentDir(), "session-store", "session-store.sqlite");
 }
 
-type ObservationMark = { markType: string; reason?: string; replacementObservationId?: string; replacementPath?: string; observationPath?: string; timestamp: string; confidence: string; manualReviewRequired: boolean };
+type ObservationMark = { markType: string; reason?: string; replacementObservationId?: string; replacementPath?: string; observationPath?: string; timestamp: string; confidence: string; manualReviewRequired: boolean; metadata?: Record<string, unknown> };
 type PruneCandidate = { sourcePath: string; replacementPath?: string; timestamp: string; confidence: string; eventLines?: number; eventBytes?: number; currentLines?: number; currentBytes?: number; category: "eligible" | "legacy-review" | "unsafe"; reason: string };
 type ThreadResumeTarget = { threadId: string; status: string; recommendedSessionId?: string; recommendedObservationId?: string; recommendedPath?: string; activeLeafPaths: string[]; recoverablePaths: string[]; reasons: string[] };
 
@@ -268,14 +273,14 @@ function currentSessionMarks(sessionFile?: string): ObservationMark[] {
 		try {
 			initStore(db);
 			const rows = db.prepare(`
-SELECT m.mark_type AS markType, m.reason AS reason, m.replacement_observation_id AS replacementObservationId, o.path AS observationPath, r.path AS replacementPath, m.timestamp AS timestamp, m.confidence AS confidence, m.manual_review_required AS manualReviewRequired
+SELECT m.mark_type AS markType, m.reason AS reason, m.replacement_observation_id AS replacementObservationId, o.path AS observationPath, r.path AS replacementPath, m.timestamp AS timestamp, m.confidence AS confidence, m.manual_review_required AS manualReviewRequired, m.metadata_json AS metadataJson
 FROM observation_marks m
 JOIN session_observations o ON o.id = m.observation_id
 LEFT JOIN session_observations r ON r.id = m.replacement_observation_id
 WHERE o.path = ?
 ORDER BY m.timestamp DESC, m.mark_type
-`).all(sessionFile) as { markType: string; reason?: string; replacementObservationId?: string; observationPath?: string; replacementPath?: string; timestamp: string; confidence: string; manualReviewRequired: number }[];
-			return rows.map((row) => ({ ...row, manualReviewRequired: Boolean(row.manualReviewRequired) }));
+`).all(sessionFile) as { markType: string; reason?: string; replacementObservationId?: string; observationPath?: string; replacementPath?: string; timestamp: string; confidence: string; manualReviewRequired: number ; metadataJson?: string }[];
+			return rows.map((row) => ({ ...row, manualReviewRequired: Boolean(row.manualReviewRequired), metadata: parseJson(row.metadataJson, {}) as Record<string, unknown> }));
 		} finally {
 			db.close();
 		}
@@ -400,13 +405,13 @@ function allAvailabilityMarks(): ObservationMark[] {
 		try {
 			initStore(db);
 			const rows = db.prepare(`
-SELECT m.mark_type AS markType, m.reason AS reason, m.replacement_observation_id AS replacementObservationId, o.path AS observationPath, r.path AS replacementPath, m.timestamp AS timestamp, m.confidence AS confidence, m.manual_review_required AS manualReviewRequired
+SELECT m.mark_type AS markType, m.reason AS reason, m.replacement_observation_id AS replacementObservationId, o.path AS observationPath, r.path AS replacementPath, m.timestamp AS timestamp, m.confidence AS confidence, m.manual_review_required AS manualReviewRequired, m.metadata_json AS metadataJson
 FROM observation_marks m
 JOIN session_observations o ON o.id = m.observation_id
 LEFT JOIN session_observations r ON r.id = m.replacement_observation_id
 ORDER BY m.timestamp DESC, m.mark_type
-`).all() as { markType: string; reason?: string; replacementObservationId?: string; observationPath?: string; replacementPath?: string; timestamp: string; confidence: string; manualReviewRequired: number }[];
-			return rows.map((row) => ({ ...row, manualReviewRequired: Boolean(row.manualReviewRequired) }));
+`).all() as { markType: string; reason?: string; replacementObservationId?: string; observationPath?: string; replacementPath?: string; timestamp: string; confidence: string; manualReviewRequired: number ; metadataJson?: string }[];
+			return rows.map((row) => ({ ...row, manualReviewRequired: Boolean(row.manualReviewRequired), metadata: parseJson(row.metadataJson, {}) as Record<string, unknown> }));
 		} finally {
 			db.close();
 		}
@@ -415,8 +420,18 @@ ORDER BY m.timestamp DESC, m.mark_type
 	}
 }
 
+function isPreserveMark(mark: ObservationMark) {
+	return mark.markType === "preserve" || mark.markType === "intentional_branch";
+}
+
+function preserveLabel(mark: ObservationMark) {
+	return typeof mark.metadata?.label === "string" ? mark.metadata.label : mark.reason;
+}
+
 function unavailableSessionSet(): Set<string> {
-	return new Set(allAvailabilityMarks().filter((mark) => mark.markType === "superseded" || mark.markType === "deletion_candidate").map((mark) => mark.observationPath).filter((path): path is string => Boolean(path)));
+	const marks = allAvailabilityMarks();
+	const preserved = new Set(marks.filter(isPreserveMark).map((mark) => mark.observationPath).filter((path): path is string => Boolean(path)));
+	return new Set(marks.filter((mark) => (mark.markType === "superseded" || mark.markType === "deletion_candidate") && !preserved.has(mark.observationPath ?? "")).map((mark) => mark.observationPath).filter((path): path is string => Boolean(path)));
 }
 
 function threadResumeTargetsForSession(sessionFile?: string): ThreadResumeTarget[] {
@@ -460,7 +475,19 @@ function threadResumeLines(sessionFile?: string): string[] {
 
 function movedWarningLines(sessionFile?: string): string[] {
 	const marks = currentSessionMarks(sessionFile);
+	const preserveMarks = marks.filter(isPreserveMark);
 	const relevant = marks.filter((mark) => mark.markType === "superseded" || mark.markType === "deletion_candidate");
+	if (preserveMarks.length) {
+		const latest = preserveMarks[0];
+		return [
+			"",
+			"✓ Current session is a preserved intentional branch:",
+			`- ${preserveLabel(latest) ?? "preserved branch"} @ ${latest.timestamp}${latest.reason ? ` — ${latest.reason}` : ""}`,
+			`  provenance: ${latest.confidence}; source: ${latest.metadata?.sidecarMarkType ?? latest.markType}`,
+			...(relevant.length ? ["  Superseded/deletion-candidate relocation marks are retained as history but ignored for normal prune guidance."] : []),
+			"Raw session file should be preserved unless explicitly forced.",
+		];
+	}
 	if (!relevant.length) return [];
 	const replacement = relevant.find((mark) => mark.replacementPath)?.replacementPath;
 	return [
@@ -471,7 +498,6 @@ function movedWarningLines(sessionFile?: string): string[] {
 		"Raw session file has not been deleted; recovery remains possible.",
 	];
 }
-
 function displayName(ctx: any): string | undefined {
 	const candidates = [
 		ctx.sessionManager?.getSessionName?.(),
