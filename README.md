@@ -47,8 +47,10 @@ Use `--diverge` when both source and destination should remain active. Diverge r
 Session moves write scripts under:
 
 ```text
-~/.pi/agent/relocations/
+~/.pi/agent/session-move/restart-scripts/
 ```
+
+Legacy restart scripts under `~/.pi/agent/relocations/` remain readable historical evidence.
 
 Restart manually with the copy-paste command printed by `/move`:
 
@@ -60,7 +62,7 @@ pi -c
 The extension still writes convenience scripts under `~/.pi/agent/relocations/`, including:
 
 ```bash
-bash ~/.pi/agent/relocations/latest.sh
+bash ~/.pi/agent/session-move/restart-scripts/latest.sh
 ```
 
 Prefer the direct `cd` + `pi -c` command when you want the terminal shell to remain in the target cwd after Pi exits. Running `latest.sh` starts Pi in the target cwd, but the script is a child process and cannot permanently change the original shell's cwd.
@@ -69,10 +71,28 @@ Prefer the direct `cd` + `pi -c` command when you want the terminal shell to rem
 
 ## Store and manifest
 
-Raw manifest:
+New session-move manifest:
+
+```text
+~/.pi/agent/session-move/manifests/relocations.jsonl
+```
+
+Legacy manifest still read for compatibility:
 
 ```text
 ~/.pi/agent/relocations.jsonl
+```
+
+Lineage names are written to:
+
+```text
+~/.pi/agent/session-move/manifests/relocation-lineages.jsonl
+```
+
+Legacy lineage names are still read from:
+
+```text
+~/.pi/agent/relocation-lineages.jsonl
 ```
 
 Canonical SQLite store:
@@ -115,13 +135,29 @@ Name the current lineage with:
 /move-lineage --name publish-pi-packages
 ```
 
-Lineage names are metadata about the chain/family, not individual session names. They are stored separately from the append-only relocation manifest in:
+Lineage names are metadata about the chain/family, not individual session names. They are stored separately from the append-only session-move manifest in:
 
 ```text
-~/.pi/agent/relocation-lineages.jsonl
+~/.pi/agent/session-move/manifests/relocation-lineages.jsonl
 ```
 
 When Pi exposes session naming APIs, `/move-lineage --name` also appends the name to the current session display info.
+
+## Legacy evidence copy
+
+Legacy files are not rewritten or deleted. To copy old top-level relocation evidence into a tidy namespace for archival review, run:
+
+```bash
+npm run migrate-paths
+```
+
+This copies legacy manifests, backups, and restart scripts into:
+
+```text
+~/.pi/agent/session-move/legacy/
+```
+
+and writes checksums to `migration-manifest.jsonl`.
 
 ## Boundaries
 

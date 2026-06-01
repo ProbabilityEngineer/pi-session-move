@@ -76,12 +76,28 @@ function uniqueRelocatedName(originalFile: string): string {
 	return `${safeSessionId}_relocated_${suffix}.jsonl`;
 }
 
-function manifestFile(): string {
+function legacyManifestFile(): string {
 	return join(defaultAgentDir(), "relocations.jsonl");
 }
 
-function lineageNamesFile(): string {
+function manifestFile(): string {
+	return join(defaultAgentDir(), "session-move", "manifests", "relocations.jsonl");
+}
+
+function manifestFiles(): string[] {
+	return [legacyManifestFile(), manifestFile()];
+}
+
+function legacyLineageNamesFile(): string {
 	return join(defaultAgentDir(), "relocation-lineages.jsonl");
+}
+
+function lineageNamesFile(): string {
+	return join(defaultAgentDir(), "session-move", "manifests", "relocation-lineages.jsonl");
+}
+
+function lineageNamesFiles(): string[] {
+	return [legacyLineageNamesFile(), lineageNamesFile()];
 }
 
 type RelocationRecord = {
@@ -272,8 +288,12 @@ async function replayManifestToStore(records?: RelocationRecord[]): Promise<{ ok
 	return { ok, failed };
 }
 
-function relocationScriptsDir(): string {
+function legacyRelocationScriptsDir(): string {
 	return join(defaultAgentDir(), "relocations");
+}
+
+function relocationScriptsDir(): string {
+	return join(defaultAgentDir(), "session-move", "restart-scripts");
 }
 
 function scriptStamp(): string {
@@ -565,31 +585,40 @@ async function writeRestartScripts(targetCwd: string, sessionFile: string, sessi
 	return { scriptFile, latestFile, targetCwd, sessionFile, name };
 }
 
-async function readManifest(): Promise<RelocationRecord[]> {
+async function readJsonlFile<T>(path: string): Promise<T[]> {
 	try {
-		const raw = await readFile(manifestFile(), "utf8");
+		const raw = await readFile(path, "utf8");
 		return raw
 			.split("\n")
 			.map((line) => line.trim())
 			.filter(Boolean)
-			.map((line) => JSON.parse(line) as RelocationRecord);
+			.map((line) => JSON.parse(line) as T);
 	} catch {
 		return [];
 	}
 }
 
-async function readLineageNames(): Promise<LineageNameRecord[]> {
-	try {
-		const raw = await readFile(lineageNamesFile(), "utf8");
-		return raw
-			.split("\n")
-			.map((line) => line.trim())
-			.filter(Boolean)
-			.map((line) => JSON.parse(line) as LineageNameRecord)
-			.filter((record) => record.type === "lineage_named" && Boolean(record.root) && Boolean(record.name));
-	} catch {
-		return [];
+function uniqueRecords<T>(records: T[]): T[] {
+	const seen = new Set<string>();
+	const out: T[] = [];
+	for (const record of records) {
+		const key = JSON.stringify(record);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(record);
 	}
+	return out;
+}
+
+async function readManifest(): Promise<RelocationRecord[]> {
+	return uniqueRecords((await Promise.all(manifestFiles().map((path) => readJsonlFile<RelocationRecord>(path)))).flat())
+		.sort((a, b) => a.ts.localeCompare(b.ts));
+}
+
+async function readLineageNames(): Promise<LineageNameRecord[]> {
+	return uniqueRecords((await Promise.all(lineageNamesFiles().map((path) => readJsonlFile<LineageNameRecord>(path)))).flat())
+		.filter((record) => record.type === "lineage_named" && Boolean(record.root) && Boolean(record.name))
+		.sort((a, b) => a.updated.localeCompare(b.updated));
 }
 
 async function sessionFilesInBucket(cwd: string): Promise<string[]> {
@@ -884,6 +913,10 @@ async function buildStatusOutput(ctx: any, showAll = false): Promise<string> {
 		`Current session tracked: ${currentIndex >= 0 ? `yes (#${currentIndex + 1})` : "no"}`,
 		...movedWarningLines(sessionFile),
 		`Manifest records: ${records.length}`,
+		`Manifest inputs: ${manifestFiles().map(shortPath).join(", ")}`,
+		`Lineage inputs: ${lineageNamesFiles().map(shortPath).join(", ")}`,
+		`Restart scripts: ${shortPath(relocationScriptsDir())}`,
+		`Legacy restart scripts: ${shortPath(legacyRelocationScriptsDir())}`,
 		`Current lineage hops: ${currentLineage.length}`,
 		`Forks from current lineage: ${forks.length}`,
 		`Unrecorded relocated files: ${unrecorded.length}`,
@@ -1165,6 +1198,10 @@ export default function (pi: ExtensionAPI) {
 				`Current session tracked: ${currentIndex >= 0 ? `yes (#${currentIndex + 1})` : "no"}`,
 				...movedWarningLines(sessionFile),
 				`Manifest records: ${records.length}`,
+				`Manifest inputs: ${manifestFiles().map(shortPath).join(", ")}`,
+				`Lineage inputs: ${lineageNamesFiles().map(shortPath).join(", ")}`,
+				`Restart scripts: ${shortPath(relocationScriptsDir())}`,
+				`Legacy restart scripts: ${shortPath(legacyRelocationScriptsDir())}`,
 				`Current lineage hops: ${currentLineage.length}`,
 				`Forks from current lineage: ${forks.length}`,
 				`Unrecorded relocated files: ${unrecorded.length}`,
