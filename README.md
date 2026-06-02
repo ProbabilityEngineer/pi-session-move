@@ -12,6 +12,13 @@ Install the Pi extension with:
 pi install git:github.com/ProbabilityEngineer/pi-session-move
 ```
 
+This package ships committed `dist/` JavaScript so Pi git installs can load the extension and `pil` CLI without running TypeScript directly. Package entry points are:
+
+```text
+pi extension: ./dist/index.js
+CLI bin:      ./dist/scripts/list-lineage-resume.js
+```
+
 The package also includes a small CLI, `pil`, for listing the highest-message session in each named lineage and launching Pi from the selected row. Normal npm installs expose package `bin` entries on PATH:
 
 ```bash
@@ -41,7 +48,7 @@ but Pi does not currently guarantee that package `bin` entries are linked onto y
 
 ```bash
 mkdir -p ~/.pi/agent/bin
-ln -sfn ~/.pi/agent/git/github.com/ProbabilityEngineer/pi-session-move/bin/pi-session-lineages.js ~/.pi/agent/bin/pil
+ln -sfn ~/.pi/agent/git/github.com/ProbabilityEngineer/pi-session-move/dist/scripts/list-lineage-resume.js ~/.pi/agent/bin/pil
 ```
 
 Ensure this is in your shell startup PATH:
@@ -53,7 +60,8 @@ export PATH="$HOME/.pi/agent/bin:$PATH"
 Local testing:
 
 ```bash
-pi -e ./index.ts
+npm run build
+pi -e ./dist/index.js
 ```
 
 ## Commands

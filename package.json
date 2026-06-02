@@ -1,6 +1,6 @@
 {
 	"name": "pi-session-move",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"private": false,
 	"description": "Pi extension that moves the current session context to another working directory without invoking the LLM.",
 	"type": "module",
@@ -16,7 +16,7 @@
 	},
 	"pi": {
 		"extensions": [
-			"index.ts"
+			"./dist/index.js"
 		]
 	},
 	"devDependencies": {
@@ -26,16 +26,19 @@
 	"scripts": {
 		"lineages": "tsx scripts/list-lineage-resume.ts",
 		"migrate-paths": "tsx scripts/migrate-session-move-paths.ts",
-		"migrate-paths:move": "tsx scripts/migrate-session-move-paths.ts --move"
+		"migrate-paths:move": "tsx scripts/migrate-session-move-paths.ts --move",
+		"build": "tsc --project tsconfig.json",
+		"lint": "tsc --noEmit"
 	},
 	"bin": {
-		"pil": "./bin/pi-session-lineages.js"
+		"pil": "dist/scripts/list-lineage-resume.js"
 	},
 	"files": [
-		"index.ts",
+		"dist",
 		"README.md",
-		"bin",
-		"scripts",
+		"LICENSE",
 		"tsconfig.json"
-	]
+	],
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts"
 }

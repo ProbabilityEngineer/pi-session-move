@@ -1,0 +1,1229 @@
+import { Type } from "typebox";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { promisify } from "node:util";
+import { chmod, mkdir, readFile, readdir, rename, stat, utimes, writeFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+const execFileAsync = promisify(execFile);
+function shellQuote(value) {
+    return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+function normalizeDraggedPath(value) {
+    // Finder/terminal dragged paths often arrive as shell-escaped text, e.g.
+    // /Users/sam/Library/Mobile\ Documents/com\~apple\~CloudDocs
+    // Extension args are already strings, not shell-evaluated, so unescape common
+    // single-character shell escapes before resolving/statting.
+    return value.replace(/\\(.)/g, "$1");
+}
+function expandLeadingTilde(value) {
+    if (value === "~" || value.startsWith("~/")) {
+        const home = process.env.HOME;
+        if (!home)
+            throw new Error("Cannot expand ~ because HOME is not set.");
+        return value === "~" ? home : join(home, value.slice(2));
+    }
+    if (/^~[^/]/.test(value)) {
+        throw new Error(`Unsupported tilde path form: ${value}. Use ~/path or an absolute path.`);
+    }
+    return value;
+}
+function normalizeDir(value) {
+    return resolve(expandLeadingTilde(normalizeDraggedPath(value)));
+}
+function normalizeDirArg(value, baseCwd) {
+    const normalized = expandLeadingTilde(normalizeDraggedPath(value));
+    return normalizeDir(isAbsolute(normalized) ? normalized : resolve(baseCwd, normalized));
+}
+function sessionBucketName(cwd) {
+    const normalized = normalizeDir(cwd).replace(/[/\\]+$/g, "");
+    const withoutRoot = normalized.replace(/^[/\\]+/, "");
+    return `--${withoutRoot.replace(/[/\\:]+/g, "-")}--`;
+}
+function defaultAgentDir() {
+    return process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? ".", ".pi", "agent");
+}
+function parseSessionFilename(path) {
+    const name = basename(path).replace(/\.jsonl$/i, "");
+    const uuid = name.match(/(?:^|_)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_|$)/i)?.[1];
+    const baseTimestamp = name.match(/^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)/)?.[1];
+    const relocated = name.match(/_relocated_(?:(.+)_)?(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)$/);
+    return { baseTimestamp, providerSessionId: uuid, relocatedCwdSlug: relocated?.[1], relocatedTimestamp: relocated?.[2], isRelocated: Boolean(relocated) };
+}
+function cwdFromSessionBucket(path) {
+    const bucket = basename(dirname(path));
+    const match = bucket.match(/^--(.+)--$/);
+    return match ? `/${match[1].replace(/-/g, "/")}` : undefined;
+}
+function uniqueRelocatedName(originalFile) {
+    const parsed = basename(originalFile).replace(/\.jsonl$/i, "");
+    const originalSessionId = parsed.split("_relocated_")[0] || "session";
+    const safeSessionId = originalSessionId.slice(0, 80);
+    const suffix = createHash("sha256").update(`${originalFile}\0${Date.now()}\0${Math.random()}`).digest("hex").slice(0, 12);
+    return `${safeSessionId}_relocated_${suffix}.jsonl`;
+}
+function legacyManifestFile() {
+    return join(defaultAgentDir(), "relocations.jsonl");
+}
+function manifestFile() {
+    return join(defaultAgentDir(), "session-move", "manifests", "relocations.jsonl");
+}
+function manifestFiles() {
+    return [legacyManifestFile(), manifestFile()];
+}
+function legacyLineageNamesFile() {
+    return join(defaultAgentDir(), "relocation-lineages.jsonl");
+}
+function lineageNamesFile() {
+    return join(defaultAgentDir(), "session-move", "manifests", "relocation-lineages.jsonl");
+}
+function lineageNamesFiles() {
+    return [legacyLineageNamesFile(), lineageNamesFile()];
+}
+async function appendManifest(record) {
+    const path = manifestFile();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", flag: "a" });
+}
+async function appendLineageName(record) {
+    const path = lineageNamesFile();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", flag: "a" });
+}
+function hashId(prefix, ...parts) {
+    return `${prefix}_${parts.filter(Boolean).join("\u0000").replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 48)}_${Math.abs(parts.join("\u0000").split("").reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0)).toString(16)}`;
+}
+function parseJson(value, fallback) {
+    if (!value)
+        return fallback;
+    try {
+        return JSON.parse(value);
+    }
+    catch {
+        return fallback;
+    }
+}
+function sessionFileId(path) {
+    return hashId("session", path);
+}
+function observationId(path) {
+    return hashId("obs", path);
+}
+function initStore(db) {
+    db.exec(`
+CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, provider TEXT NOT NULL, kind TEXT NOT NULL, uri TEXT NOT NULL, label TEXT, first_observed_at TEXT, last_observed_at TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, provider TEXT NOT NULL, provider_session_id TEXT, canonical_key TEXT NOT NULL UNIQUE, first_seen_at TEXT, last_seen_at TEXT, start_timestamp TEXT, end_timestamp TEXT, event_count INTEGER, line_count INTEGER, byte_count INTEGER, content_sha256 TEXT, prefix_sha256 TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS session_observations (id TEXT PRIMARY KEY, session_id TEXT, source_id TEXT, path TEXT, provider_session_id TEXT, observed_at TEXT, snapshot_label TEXT, file_birthtime TEXT, file_mtime TEXT, file_size INTEGER, line_count INTEGER, first_event_at TEXT, last_event_at TEXT, content_sha256 TEXT, prefix_sha256 TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS edges (id TEXT PRIMARY KEY, source_session_id TEXT, target_session_id TEXT, edge_type TEXT NOT NULL, timestamp TEXT, source_observation_id TEXT, target_observation_id TEXT, confidence TEXT NOT NULL, provenance TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS labels (id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL, label_type TEXT NOT NULL, value TEXT NOT NULL, valid_from TEXT, valid_to TEXT, confidence TEXT NOT NULL, source_id TEXT, evidence_id TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS observation_marks (id TEXT PRIMARY KEY, observation_id TEXT NOT NULL, mark_type TEXT NOT NULL, reason TEXT, replacement_observation_id TEXT, source TEXT NOT NULL, timestamp TEXT NOT NULL, confidence TEXT NOT NULL, manual_review_required INTEGER NOT NULL DEFAULT 1, metadata_json TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS batch_operations (id TEXT PRIMARY KEY, operation_type TEXT NOT NULL, source_path TEXT NOT NULL, destination_path TEXT NOT NULL, timestamp TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS prune_operations (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, source_path TEXT NOT NULL, replacement_path TEXT, action TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, trash_path TEXT, current_lines INTEGER, event_lines INTEGER, current_bytes INTEGER, event_bytes INTEGER, source TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}');
+`);
+}
+async function sessionLines(path) {
+    try {
+        return (await readFile(path, "utf8")).split("\n").filter((line) => line.trim()).length;
+    }
+    catch {
+        return undefined;
+    }
+}
+async function sessionStats(path) {
+    try {
+        const [raw, st] = await Promise.all([readFile(path, "utf8"), stat(path)]);
+        const lines = raw.split("\n").filter((line) => line.trim());
+        return { lineCount: lines.length, byteCount: st.size, fileBirthtime: st.birthtime.toISOString(), fileMtime: st.mtime.toISOString() };
+    }
+    catch {
+        return { lineCount: null, byteCount: null, fileBirthtime: null, fileMtime: null };
+    }
+}
+async function appendStoreRecord(record, name) {
+    await mkdir(dirname(storeFile()), { recursive: true });
+    const db = new DatabaseSync(storeFile());
+    try {
+        initStore(db);
+        const sourceId = "source_pi_session_move_manifest";
+        db.prepare("INSERT OR IGNORE INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(sourceId, "pi", "relocation_manifest", manifestFile(), "Pi session move manifest", null, null, "{}");
+        const upsertSession = db.prepare("INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        const upsertObs = db.prepare("INSERT OR REPLACE INTO session_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        const upsertEdge = db.prepare("INSERT OR REPLACE INTO edges VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        const upsertLabel = db.prepare("INSERT OR REPLACE INTO labels VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        const upsertMark = db.prepare("INSERT OR REPLACE INTO observation_marks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        const upsertBatch = db.prepare("INSERT OR REPLACE INTO batch_operations VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        const sourceSessionId = sessionFileId(record.sourceSession);
+        const destSessionId = sessionFileId(record.destinationSession);
+        const sourceObsId = observationId(record.sourceSession);
+        const destObsId = observationId(record.destinationSession);
+        const sourceStats = await sessionStats(record.sourceSession);
+        const destStats = await sessionStats(record.destinationSession);
+        upsertSession.run(sourceSessionId, "pi", record.sourceSessionId ?? null, record.sourceSession, null, record.ts, null, null, null, sourceStats.lineCount, sourceStats.byteCount, null, null, JSON.stringify({ cwd: record.fromCwd, ...(name ? { displayName: name } : {}) }));
+        upsertSession.run(destSessionId, "pi", record.destinationSessionId ?? null, record.destinationSession, record.ts, null, null, null, null, destStats.lineCount, destStats.byteCount, null, null, JSON.stringify({ cwd: record.toCwd, ...(name ? { displayName: name } : {}) }));
+        upsertObs.run(sourceObsId, sourceSessionId, sourceId, record.sourceSession, record.sourceSessionId ?? null, record.ts, null, sourceStats.fileBirthtime, sourceStats.fileMtime, sourceStats.byteCount, sourceStats.lineCount, null, null, null, null, JSON.stringify({ cwd: record.fromCwd }));
+        upsertObs.run(destObsId, destSessionId, sourceId, record.destinationSession, record.destinationSessionId ?? null, record.ts, null, destStats.fileBirthtime, destStats.fileMtime, destStats.byteCount, destStats.lineCount, null, null, null, null, JSON.stringify({ cwd: record.toCwd }));
+        const inferredLegacyMove = record.mode === undefined;
+        const mode = record.mode ?? "move";
+        const confidence = inferredLegacyMove ? "inferred-from-legacy-manifest" : "authoritative";
+        const edgeId = hashId("edge", record.ts, record.sourceSession, record.destinationSession);
+        upsertEdge.run(edgeId, sourceSessionId, destSessionId, mode === "diverge" ? "diverge" : "relocation", record.ts, sourceObsId, destObsId, confidence, "pi-session-move", JSON.stringify({ fromCwd: record.fromCwd, toCwd: record.toCwd, replacements: record.replacements, parent: record.parent, sourceSessionId: record.sourceSessionId, destinationSessionId: record.destinationSessionId, mode, batchId: record.batchId, sourceLinesAtEvent: record.sourceLinesAtEvent, sourceBytesAtEvent: record.sourceBytesAtEvent, inferredLegacyMove }));
+        if (record.batchId)
+            upsertBatch.run(record.batchId, "bucket_relocation", record.fromCwd, record.toCwd, record.ts, "pi-session-move", "applied", JSON.stringify({ mode, inferredLegacyMove }));
+        if (mode === "move") {
+            const markReason = inferredLegacyMove ? "legacy relocation manifest record inferred as move; manual review required" : "moved by pi-session-move semantics";
+            upsertMark.run(hashId("mark", sourceObsId, "superseded", destObsId, record.ts), sourceObsId, "superseded", markReason, destObsId, "pi-session-move", record.ts, confidence, 1, JSON.stringify({ batchId: record.batchId, inferredLegacyMove }));
+            upsertMark.run(hashId("mark", sourceObsId, "deletion_candidate", destObsId, record.ts), sourceObsId, "deletion_candidate", "old copy after session move; requires manual review before deletion", destObsId, "pi-session-move", record.ts, confidence, 1, JSON.stringify({ batchId: record.batchId, inferredLegacyMove }));
+        }
+        upsertLabel.run(hashId("label", sourceSessionId, "cwd", record.fromCwd), "session", sourceSessionId, "cwd", record.fromCwd, null, null, "authoritative", sourceId, null, "{}");
+        upsertLabel.run(hashId("label", destSessionId, "cwd", record.toCwd), "session", destSessionId, "cwd", record.toCwd, null, null, "authoritative", sourceId, null, "{}");
+        if (name) {
+            upsertLabel.run(hashId("label", sourceSessionId, "display", name), "session", sourceSessionId, "display_name", name, null, null, "authoritative", sourceId, null, "{}");
+            upsertLabel.run(hashId("label", destSessionId, "display", name), "session", destSessionId, "display_name", name, null, null, "authoritative", sourceId, null, "{}");
+        }
+    }
+    finally {
+        db.close();
+    }
+}
+async function indexSessionObservation(path) {
+    const parsed = parseSessionFilename(path);
+    const cwd = cwdFromSessionBucket(path);
+    const stats = await sessionStats(path);
+    const db = new DatabaseSync(storeFile());
+    try {
+        initStore(db);
+        const sourceId = "source_pi_sessions_crawl";
+        db.prepare("INSERT OR IGNORE INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(sourceId, "pi", "sessions_crawl", join(defaultAgentDir(), "sessions"), "Pi sessions crawl", null, null, "{}");
+        const sessionId = sessionFileId(path);
+        const obsId = observationId(path);
+        db.prepare("INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(sessionId, "pi", parsed.providerSessionId ?? null, path, null, stats.fileMtime, parsed.baseTimestamp ?? null, null, null, stats.lineCount, stats.byteCount, null, null, JSON.stringify({ cwd, filename: parsed }));
+        db.prepare("INSERT OR REPLACE INTO session_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(obsId, sessionId, sourceId, path, parsed.providerSessionId ?? null, new Date().toISOString(), "sessions-crawl", stats.fileBirthtime, stats.fileMtime, stats.byteCount, stats.lineCount, null, null, null, null, JSON.stringify({ cwd, filename: parsed, unlinkedObservation: true }));
+        db.prepare("INSERT OR REPLACE INTO labels VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(hashId("label", sessionId, "cwd", cwd), "session", sessionId, "cwd", cwd ?? "unknown", null, null, "inferred", sourceId, null, "{}");
+    }
+    finally {
+        db.close();
+    }
+}
+async function crawlSessionFiles(root = join(defaultAgentDir(), "sessions")) {
+    let indexed = 0;
+    let failed = 0;
+    async function walk(dir) {
+        const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+            const path = join(dir, entry.name);
+            if (entry.isDirectory())
+                await walk(path);
+            else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+                try {
+                    await indexSessionObservation(path);
+                    indexed++;
+                }
+                catch {
+                    failed++;
+                }
+            }
+        }
+    }
+    await walk(root);
+    return { indexed, failed };
+}
+async function replayManifestToStore(records) {
+    records ??= await readManifest();
+    let ok = 0;
+    let failed = 0;
+    for (const record of records) {
+        try {
+            await appendStoreRecord(record);
+            ok++;
+        }
+        catch {
+            failed++;
+        }
+    }
+    return { ok, failed };
+}
+function legacyRelocationScriptsDir() {
+    return join(defaultAgentDir(), "relocations");
+}
+function relocationScriptsDir() {
+    return join(defaultAgentDir(), "session-move", "restart-scripts");
+}
+function scriptStamp() {
+    return new Date().toISOString().replace(/[:.]/g, "-");
+}
+function storeFile() {
+    return join(defaultAgentDir(), "session-store", "session-store.sqlite");
+}
+function currentSessionMarks(sessionFile) {
+    if (!sessionFile)
+        return [];
+    try {
+        const db = new DatabaseSync(storeFile(), { readOnly: true });
+        try {
+            initStore(db);
+            const rows = db.prepare(`
+SELECT m.mark_type AS markType, m.reason AS reason, m.replacement_observation_id AS replacementObservationId, o.path AS observationPath, r.path AS replacementPath, m.timestamp AS timestamp, m.confidence AS confidence, m.manual_review_required AS manualReviewRequired, m.metadata_json AS metadataJson
+FROM observation_marks m
+JOIN session_observations o ON o.id = m.observation_id
+LEFT JOIN session_observations r ON r.id = m.replacement_observation_id
+WHERE o.path = ?
+ORDER BY m.timestamp DESC, m.mark_type
+`).all(sessionFile);
+            return rows.map((row) => ({ ...row, manualReviewRequired: Boolean(row.manualReviewRequired), metadata: parseJson(row.metadataJson, {}) }));
+        }
+        finally {
+            db.close();
+        }
+    }
+    catch {
+        return [];
+    }
+}
+async function uniqueTrashPath(sourcePath) {
+    const trashDir = join(process.env.HOME ?? dirname(sourcePath), ".Trash");
+    await mkdir(trashDir, { recursive: true });
+    const parsed = basename(sourcePath);
+    let candidate = join(trashDir, parsed);
+    let index = 1;
+    while (await stat(candidate).then(() => true, () => false)) {
+        candidate = join(trashDir, `${parsed}.${index}`);
+        index++;
+    }
+    return candidate;
+}
+function readPruneCandidates(currentSession) {
+    try {
+        const db = new DatabaseSync(storeFile(), { readOnly: true });
+        try {
+            initStore(db);
+            const rows = db.prepare(`
+SELECT o.path AS sourcePath, r.path AS replacementPath, m.timestamp AS timestamp, m.confidence AS confidence, e.metadata_json AS edgeMetadata
+FROM observation_marks m
+JOIN session_observations o ON o.id = m.observation_id
+LEFT JOIN session_observations r ON r.id = m.replacement_observation_id
+LEFT JOIN edges e ON e.source_observation_id = o.id AND e.target_observation_id = r.id
+WHERE m.mark_type = 'deletion_candidate'
+ORDER BY m.timestamp DESC, o.path
+`).all();
+            const bySource = new Map();
+            for (const row of rows) {
+                if (bySource.has(row.sourcePath))
+                    continue;
+                let metadata = {};
+                try {
+                    metadata = row.edgeMetadata ? JSON.parse(row.edgeMetadata) : {};
+                }
+                catch { }
+                let category = "eligible";
+                let reason = "superseded move source with replacement";
+                if (row.sourcePath === currentSession) {
+                    category = "unsafe";
+                    reason = "current live session";
+                }
+                else if (!row.replacementPath) {
+                    category = "unsafe";
+                    reason = "missing replacement observation";
+                }
+                else if (metadata.mode === "diverge" || metadata.mode === "branch") {
+                    category = "unsafe";
+                    reason = "diverged source";
+                }
+                else if (row.confidence !== "authoritative") {
+                    category = "legacy-review";
+                    reason = `legacy/inferred mark (${row.confidence})`;
+                }
+                bySource.set(row.sourcePath, { sourcePath: row.sourcePath, replacementPath: row.replacementPath, timestamp: row.timestamp, confidence: row.confidence, eventLines: metadata.sourceLinesAtEvent, eventBytes: metadata.sourceBytesAtEvent, category, reason });
+            }
+            return [...bySource.values()];
+        }
+        finally {
+            db.close();
+        }
+    }
+    catch {
+        return [];
+    }
+}
+async function classifyPruneCandidates(currentSession) {
+    const candidates = readPruneCandidates(currentSession);
+    for (const candidate of candidates) {
+        const sourceStats = await sessionStats(candidate.sourcePath);
+        candidate.currentLines = sourceStats.lineCount ?? undefined;
+        candidate.currentBytes = sourceStats.byteCount ?? undefined;
+        if (!(await stat(candidate.sourcePath).then((st) => st.isFile(), () => false))) {
+            candidate.category = "unsafe";
+            candidate.reason = "source file missing";
+        }
+        else if (!candidate.replacementPath || !(await stat(candidate.replacementPath).then((st) => st.isFile(), () => false))) {
+            candidate.category = "unsafe";
+            candidate.reason = "replacement file missing";
+        }
+        else if (candidate.category === "eligible" && candidate.eventLines !== undefined && candidate.currentLines !== candidate.eventLines) {
+            candidate.category = "unsafe";
+            candidate.reason = "source line count changed after relocation";
+        }
+        else if (candidate.category === "eligible" && candidate.eventBytes !== undefined && candidate.currentBytes !== candidate.eventBytes) {
+            candidate.category = "unsafe";
+            candidate.reason = "source byte count changed after relocation";
+        }
+        else if (candidate.category === "eligible" && (candidate.eventLines === undefined || candidate.eventBytes === undefined)) {
+            candidate.category = "legacy-review";
+            candidate.reason = "missing relocation line/byte checkpoint";
+        }
+    }
+    return candidates;
+}
+async function uniqueStagePath(sourcePath, batch) {
+    const bucket = basename(dirname(sourcePath));
+    const dir = join(defaultAgentDir(), "session-archive", "to-delete", batch, bucket);
+    await mkdir(dir, { recursive: true });
+    let candidate = join(dir, basename(sourcePath));
+    let index = 1;
+    while (await stat(candidate).then(() => true, () => false))
+        candidate = join(dir, `${basename(sourcePath)}.${index++}`);
+    return candidate;
+}
+function duplicatePruneCandidates(candidates, currentSession) {
+    const groups = new Map();
+    for (const candidate of candidates) {
+        const id = parseSessionFilename(candidate.sourcePath).providerSessionId;
+        if (!id)
+            continue;
+        const group = groups.get(id) ?? [];
+        group.push(candidate);
+        groups.set(id, group);
+    }
+    const out = [];
+    for (const group of groups.values()) {
+        if (group.length < 2)
+            continue;
+        const sorted = group.sort((a, b) => a.sourcePath.localeCompare(b.sourcePath));
+        for (const candidate of sorted.slice(0, -1)) {
+            if (candidate.sourcePath === currentSession)
+                continue;
+            out.push({ ...candidate, category: candidate.category === "unsafe" ? "unsafe" : "legacy-review", reason: `duplicate provider session id; keeping ${shortPath(sorted[sorted.length - 1].sourcePath)}` });
+        }
+    }
+    return out;
+}
+function recordPruneOperation(candidate, status, action, reason, trashPath) {
+    const db = new DatabaseSync(storeFile());
+    try {
+        initStore(db);
+        db.prepare("INSERT OR REPLACE INTO prune_operations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(hashId("prune", candidate.sourcePath, new Date().toISOString()), new Date().toISOString(), candidate.sourcePath, candidate.replacementPath ?? null, action, status, reason, trashPath ?? null, candidate.currentLines ?? null, candidate.eventLines ?? null, candidate.currentBytes ?? null, candidate.eventBytes ?? null, "pi-session-move", JSON.stringify({ confidence: candidate.confidence, category: candidate.category }));
+    }
+    finally {
+        db.close();
+    }
+}
+function allAvailabilityMarks() {
+    try {
+        const db = new DatabaseSync(storeFile(), { readOnly: true });
+        try {
+            initStore(db);
+            const rows = db.prepare(`
+SELECT m.mark_type AS markType, m.reason AS reason, m.replacement_observation_id AS replacementObservationId, o.path AS observationPath, r.path AS replacementPath, m.timestamp AS timestamp, m.confidence AS confidence, m.manual_review_required AS manualReviewRequired, m.metadata_json AS metadataJson
+FROM observation_marks m
+JOIN session_observations o ON o.id = m.observation_id
+LEFT JOIN session_observations r ON r.id = m.replacement_observation_id
+ORDER BY m.timestamp DESC, m.mark_type
+`).all();
+            return rows.map((row) => ({ ...row, manualReviewRequired: Boolean(row.manualReviewRequired), metadata: parseJson(row.metadataJson, {}) }));
+        }
+        finally {
+            db.close();
+        }
+    }
+    catch {
+        return [];
+    }
+}
+function isPreserveMark(mark) {
+    return mark.markType === "preserve" || mark.markType === "intentional_branch";
+}
+function preserveLabel(mark) {
+    return typeof mark.metadata?.label === "string" ? mark.metadata.label : mark.reason;
+}
+function unavailableSessionSet() {
+    const marks = allAvailabilityMarks();
+    const preserved = new Set(marks.filter(isPreserveMark).map((mark) => mark.observationPath).filter((path) => Boolean(path)));
+    return new Set(marks.filter((mark) => (mark.markType === "superseded" || mark.markType === "deletion_candidate") && !preserved.has(mark.observationPath ?? "")).map((mark) => mark.observationPath).filter((path) => Boolean(path)));
+}
+function threadResumeTargetsForSession(sessionFile) {
+    if (!sessionFile)
+        return [];
+    try {
+        const db = new DatabaseSync(storeFile(), { readOnly: true });
+        try {
+            const rows = db.prepare(`
+SELECT tr.thread_id AS threadId, tr.status AS status, tr.recommended_session_id AS recommendedSessionId, tr.recommended_observation_id AS recommendedObservationId,
+       ro.path AS recommendedPath, tr.active_leaf_session_ids_json AS activeLeafSessionIdsJson, tr.recoverable_session_ids_json AS recoverableSessionIdsJson, tr.reasons_json AS reasonsJson
+FROM thread_resume_targets tr
+JOIN thread_members tm ON tm.thread_id = tr.thread_id
+JOIN sessions s ON s.id = tm.session_id
+LEFT JOIN session_observations ro ON ro.id = tr.recommended_observation_id
+WHERE s.canonical_key = ?
+ORDER BY tr.thread_id
+`).all(sessionFile);
+            const pathForSession = db.prepare("SELECT canonical_key AS path FROM sessions WHERE id = ?");
+            const toPaths = (raw) => {
+                try {
+                    return JSON.parse(raw).flatMap((id) => pathForSession.get(id)?.path ? [pathForSession.get(id).path] : []);
+                }
+                catch {
+                    return [];
+                }
+            };
+            return rows.map((row) => ({ threadId: row.threadId, status: row.status, recommendedSessionId: row.recommendedSessionId, recommendedObservationId: row.recommendedObservationId, recommendedPath: row.recommendedPath, activeLeafPaths: toPaths(row.activeLeafSessionIdsJson), recoverablePaths: toPaths(row.recoverableSessionIdsJson), reasons: JSON.parse(row.reasonsJson) }));
+        }
+        finally {
+            db.close();
+        }
+    }
+    catch {
+        return [];
+    }
+}
+function threadResumeLines(sessionFile) {
+    const targets = threadResumeTargetsForSession(sessionFile);
+    if (!targets.length)
+        return [];
+    return [
+        "",
+        "Logical thread resume:",
+        ...targets.flatMap((target) => [
+            `- ${target.status}${target.recommendedPath ? `: ${shortPath(target.recommendedPath)}` : ""}`,
+            ...(target.status === "branch-choices" ? target.activeLeafPaths.map((path) => `  branch: ${shortPath(path)}`) : []),
+            ...(target.status === "recoverable-only" ? target.recoverablePaths.map((path) => `  recoverable: ${shortPath(path)}`) : []),
+            `  reasons: ${target.reasons.join(", ")}`,
+        ]),
+    ];
+}
+function movedWarningLines(sessionFile) {
+    const marks = currentSessionMarks(sessionFile);
+    const preserveMarks = marks.filter(isPreserveMark);
+    const relevant = marks.filter((mark) => mark.markType === "superseded" || mark.markType === "deletion_candidate");
+    if (preserveMarks.length) {
+        const latest = preserveMarks[0];
+        return [
+            "",
+            "✓ Current session is a preserved intentional branch:",
+            `- ${preserveLabel(latest) ?? "preserved branch"} @ ${latest.timestamp}${latest.reason ? ` — ${latest.reason}` : ""}`,
+            `  provenance: ${latest.confidence}; source: ${latest.metadata?.sidecarMarkType ?? latest.markType}`,
+            ...(relevant.length ? ["  Superseded/deletion-candidate relocation marks are retained as history but ignored for normal prune guidance."] : []),
+            "Raw session file should be preserved unless explicitly forced.",
+        ];
+    }
+    if (!relevant.length)
+        return [];
+    const replacement = relevant.find((mark) => mark.replacementPath)?.replacementPath;
+    return [
+        "",
+        "⚠ Current session has canonical-store availability marks:",
+        ...relevant.map((mark) => `- ${mark.markType} @ ${mark.timestamp}${mark.reason ? ` — ${mark.reason}` : ""}`),
+        ...(replacement ? ["", `Suggested active replacement: ${shortPath(replacement)}`] : []),
+        "Raw session file has not been deleted; recovery remains possible.",
+    ];
+}
+function displayName(ctx) {
+    const candidates = [
+        ctx.sessionManager?.getSessionName?.(),
+        ctx.sessionManager?.getDisplayName?.(),
+        ctx.session?.name,
+        ctx.session?.displayName,
+    ].filter((value) => typeof value === "string" && value.trim());
+    return candidates[0];
+}
+function usableSessionName(name) {
+    const trimmed = name?.trim();
+    if (!trimmed)
+        return undefined;
+    if (["new session", "untitled", "unnamed", "default"].includes(trimmed.toLowerCase()))
+        return undefined;
+    return trimmed;
+}
+async function launchInTerminal(scriptFile) {
+    await execFileAsync("osascript", ["-e", `tell application "Terminal" to do script ${JSON.stringify(`bash ${shellQuote(scriptFile)}`)}`, "-e", `tell application "Terminal" to activate`]);
+}
+function restartCommandBlock(targetCwd) {
+    return [
+        "Run:",
+        `cd ${shellQuote(targetCwd)}`,
+        "pi -c",
+    ];
+}
+async function writeRestartScripts(targetCwd, sessionFile, sessionId, name) {
+    const dir = relocationScriptsDir();
+    await mkdir(dir, { recursive: true });
+    const content = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        ...(sessionId ? [`# Pi session id: ${sessionId}`] : []),
+        "# Use --session with the exact relocated file. Do not switch to --session-id until Pi's ID-to-file mapping is verified for copied sessions.",
+        `cd ${shellQuote(targetCwd)}`,
+        `exec pi ${name ? `--name ${shellQuote(name)} ` : ""}--session ${shellQuote(sessionFile)}`,
+        "",
+    ].join("\n");
+    const scriptFile = join(dir, `run-${scriptStamp()}.sh`);
+    const latestFile = join(dir, "latest.sh");
+    await writeFile(scriptFile, content, { encoding: "utf8", flag: "wx" });
+    await chmod(scriptFile, 0o755);
+    await writeFile(latestFile, content, { encoding: "utf8" });
+    await chmod(latestFile, 0o755);
+    return { scriptFile, latestFile, targetCwd, sessionFile, name };
+}
+async function readJsonlFile(path) {
+    try {
+        const raw = await readFile(path, "utf8");
+        return raw
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .map((line) => JSON.parse(line));
+    }
+    catch {
+        return [];
+    }
+}
+function uniqueRecords(records) {
+    const seen = new Set();
+    const out = [];
+    for (const record of records) {
+        const key = JSON.stringify(record);
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        out.push(record);
+    }
+    return out;
+}
+async function readManifest() {
+    return uniqueRecords((await Promise.all(manifestFiles().map((path) => readJsonlFile(path)))).flat())
+        .sort((a, b) => a.ts.localeCompare(b.ts));
+}
+async function readLineageNames() {
+    return uniqueRecords((await Promise.all(lineageNamesFiles().map((path) => readJsonlFile(path)))).flat())
+        .filter((record) => record.type === "lineage_named" && Boolean(record.root) && Boolean(record.name))
+        .sort((a, b) => a.updated.localeCompare(b.updated));
+}
+async function sessionFilesInBucket(cwd) {
+    const dir = join(defaultAgentDir(), "sessions", sessionBucketName(cwd));
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl")).map((entry) => join(dir, entry.name)).sort();
+}
+async function relocateSessionFile(sourceFile, oldCwd, targetCwd, mode, batchId, name) {
+    const original = await readFile(sourceFile, "utf8");
+    let relocated = replaceAllLiteral(original, oldCwd, targetCwd);
+    relocated = replaceAllLiteral(relocated, oldCwd.replace(/\//g, "\\/"), targetCwd.replace(/\//g, "\\/"));
+    const replacements = original === relocated ? 0 : original.split(oldCwd).length - 1;
+    const destinationDir = join(defaultAgentDir(), "sessions", sessionBucketName(targetCwd));
+    await mkdir(destinationDir, { recursive: true });
+    const destinationFile = join(destinationDir, uniqueRelocatedName(sourceFile));
+    await writeFile(destinationFile, relocated, { encoding: "utf8", flag: "wx" });
+    const sessionId = parseSessionFilename(sourceFile).providerSessionId;
+    const record = { ts: new Date().toISOString(), fromCwd: oldCwd, toCwd: targetCwd, sourceSession: sourceFile, destinationSession: destinationFile, parent: sourceFile, replacements, sourceSessionId: sessionId, destinationSessionId: sessionId, mode, operationType: batchId ? "bucket_relocation" : "session_relocation", tool: "pi-session-move", batchId, sourceLinesAtEvent: original.split("\n").filter((line) => line.trim()).length, sourceBytesAtEvent: Buffer.byteLength(original) };
+    await appendManifest(record);
+    await appendStoreRecord(record, name);
+    return { record, replacements };
+}
+async function findRelocatedSessions(root = join(defaultAgentDir(), "sessions")) {
+    const found = [];
+    async function walk(dir) {
+        let entries;
+        try {
+            entries = await readdir(dir, { withFileTypes: true });
+        }
+        catch {
+            return;
+        }
+        for (const entry of entries) {
+            const path = join(dir, entry.name);
+            if (entry.isDirectory())
+                await walk(path);
+            else if (entry.isFile() && entry.name.includes("_relocated_") && entry.name.endsWith(".jsonl"))
+                found.push(path);
+        }
+    }
+    await walk(root);
+    return found.sort();
+}
+function replaceAllLiteral(input, from, to) {
+    return input.split(from).join(to);
+}
+function parseWords(args) {
+    const words = [];
+    let current = "";
+    let quote;
+    let escaping = false;
+    for (const char of args) {
+        if (escaping) {
+            current += char;
+            escaping = false;
+            continue;
+        }
+        if (char === "\\") {
+            escaping = true;
+            continue;
+        }
+        if (quote) {
+            if (char === quote)
+                quote = undefined;
+            else
+                current += char;
+            continue;
+        }
+        if (char === "'" || char === '"') {
+            quote = char;
+            continue;
+        }
+        if (/\s/.test(char)) {
+            if (current) {
+                words.push(current);
+                current = "";
+            }
+            continue;
+        }
+        current += char;
+    }
+    if (escaping)
+        current += "\\";
+    if (current)
+        words.push(current);
+    return words;
+}
+function parseArgs(args) {
+    let force = false;
+    let diverge = false;
+    let dryRun = false;
+    let launch = false;
+    let shutdown = false;
+    let verbose = false;
+    const positional = [];
+    for (const value of parseWords(args)) {
+        if (value === "--force")
+            force = true;
+        else if (value === "--diverge")
+            diverge = true;
+        else if (value === "--dry-run")
+            dryRun = true;
+        else if (value === "--launch")
+            launch = true;
+        else if (value === "--shutdown")
+            shutdown = true;
+        else if (value === "--verbose")
+            verbose = true;
+        else
+            positional.push(value);
+    }
+    return { target: positional.join(" ") || undefined, force, diverge, dryRun, launch, shutdown, verbose };
+}
+function hasFlag(args, flag) {
+    return parseWords(args).includes(flag);
+}
+function shortPath(path) {
+    if (!path || path.startsWith("("))
+        return path;
+    const home = process.env.HOME;
+    return home && path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
+}
+function cwdLabel(cwd) {
+    if (!cwd || cwd.startsWith("("))
+        return cwd;
+    return basename(cwd) || cwd;
+}
+function recordMarker(record) {
+    return record.inferred ? "inferred" : "explicit";
+}
+function findCurrentIndex(records, sessionFile) {
+    if (!sessionFile)
+        return -1;
+    return records.findIndex((record) => record.destinationSession === sessionFile);
+}
+function buildLineage(records, currentIndex) {
+    if (currentIndex < 0)
+        return [];
+    const byDestination = new Map(records.map((record) => [record.destinationSession, record]));
+    const lineage = [];
+    const seen = new Set();
+    let current = records[currentIndex];
+    while (current && !seen.has(current.destinationSession)) {
+        lineage.unshift(current);
+        seen.add(current.destinationSession);
+        current = byDestination.get(current.sourceSession) ?? byDestination.get(current.parent);
+    }
+    return lineage;
+}
+function lineageRoot(lineage, sessionFile) {
+    return lineage[0]?.sourceSession ?? sessionFile;
+}
+function latestLineageName(names, root, sessionFile) {
+    const latest = (records) => [...records].sort((a, b) => a.updated.localeCompare(b.updated)).at(-1);
+    if (sessionFile) {
+        const exact = latest(names.filter((record) => record.currentSession === sessionFile));
+        if (exact)
+            return exact;
+    }
+    if (!root)
+        return undefined;
+    const rootMatches = names.filter((record) => record.root === root);
+    const distinctRootNames = new Set(rootMatches.map((record) => record.name));
+    return distinctRootNames.size === 1 ? latest(rootMatches) : undefined;
+}
+function forkRecords(records, lineage) {
+    const chainSources = new Set(lineage.map((record) => record.sourceSession));
+    const chainDestinations = new Set(lineage.map((record) => record.destinationSession));
+    return records.filter((record) => chainSources.has(record.sourceSession) && !chainDestinations.has(record.destinationSession));
+}
+function currentSessionLineageName(names, sessionFile) {
+    if (!sessionFile)
+        return undefined;
+    return [...names].filter((record) => record.currentSession === sessionFile).sort((a, b) => a.updated.localeCompare(b.updated)).at(-1);
+}
+function branchNameSuggestion(baseName, sessionFile, cwd) {
+    const suffix = cwd ? basename(cwd) : sessionFile ? cwdLabel(sessionFile) : "branch";
+    return `${baseName && baseName !== "(unnamed)" ? baseName : "lineage"} / ${suffix}`;
+}
+function splitNameWarningLines(lineageNames, sessionFile, forks, currentName, cwd) {
+    if (!sessionFile || !forks.length)
+        return [];
+    if (currentSessionLineageName(lineageNames, sessionFile))
+        return [];
+    const name = currentName?.name ?? "(unnamed)";
+    const diverges = forks.filter((record) => record.mode === "diverge").length;
+    const suggested = branchNameSuggestion(name, sessionFile, cwd);
+    return [
+        "",
+        "Lineage split naming:",
+        `- This lineage has ${forks.length} recorded fork${forks.length === 1 ? "" : "s"}${diverges ? `, including ${diverges} explicit diverge/branch edge${diverges === 1 ? "" : "s"}` : ""}; the current branch is sharing pinned lineage name ${name} from an ancestor/root.`,
+        "- Give this branch its own pinned name if it is now separate work:",
+        `  /lineage-name ${suggested}`,
+    ];
+}
+async function autoPinLineageNameFromSession(ctx, lineageNames, root, sessionFile) {
+    if (!root || !sessionFile || latestLineageName(lineageNames, root, sessionFile))
+        return undefined;
+    const name = usableSessionName(displayName(ctx));
+    if (!name)
+        return undefined;
+    const now = new Date().toISOString();
+    const record = { type: "lineage_named", root, name, currentSession: sessionFile, sessionId: ctx.sessionManager?.getSessionId?.(), created: now, updated: now, source: "pi-session-move:auto-pin-session-name" };
+    await appendLineageName(record);
+    lineageNames.push(record);
+    return record;
+}
+function childRecords(records, sessionFile) {
+    if (!sessionFile)
+        return [];
+    return records.filter((record) => record.sourceSession === sessionFile || record.parent === sessionFile);
+}
+function descendantRecords(records, sessionFile) {
+    if (!sessionFile)
+        return [];
+    const descendants = [];
+    const queue = [sessionFile];
+    const seen = new Set();
+    while (queue.length) {
+        const current = queue.shift();
+        if (!current || seen.has(current))
+            continue;
+        seen.add(current);
+        for (const child of childRecords(records, current)) {
+            descendants.push(child);
+            queue.push(child.destinationSession);
+        }
+    }
+    return descendants;
+}
+function leafRecords(records, candidates, includeUnavailable = false) {
+    const unavailable = includeUnavailable ? new Set() : unavailableSessionSet();
+    return candidates.filter((record) => !childRecords(records, record.destinationSession).length && !unavailable.has(record.destinationSession));
+}
+function newestRecord(records) {
+    return [...records].sort((a, b) => a.ts.localeCompare(b.ts)).at(-1);
+}
+function lineageLength(records, record) {
+    return buildLineage(records, records.indexOf(record)).length;
+}
+function longestLineageLeaf(records, leaves) {
+    return [...leaves].sort((a, b) => lineageLength(records, a) - lineageLength(records, b) || a.ts.localeCompare(b.ts)).at(-1);
+}
+function restartCommand() {
+    return `bash ${shellQuote(join(relocationScriptsDir(), "latest.sh"))}`;
+}
+async function ensureTargetDirectory(targetCwd, force, dryRun, confirm) {
+    const targetStat = await stat(targetCwd).catch(() => undefined);
+    if (targetStat?.isDirectory())
+        return true;
+    if (targetStat)
+        throw new Error(`Target exists but is not a directory: ${targetCwd}`);
+    if (dryRun)
+        return true;
+    if (!force) {
+        const ok = await confirm("Create target directory?", `Target directory does not exist. Create it?\n\n${targetCwd}`);
+        if (!ok)
+            return false;
+    }
+    await mkdir(targetCwd, { recursive: true });
+    return true;
+}
+function formatLeaf(label, record, files = false) {
+    if (!record)
+        return [`${label}: none`];
+    const lines = [`${label}: ${cwdLabel(record.toCwd)} @ ${record.ts}`];
+    if (record.destinationSessionId)
+        lines.push(`  session id: ${record.destinationSessionId}`);
+    if (files)
+        lines.push(`  session: ${shortPath(record.destinationSession)}`);
+    return lines;
+}
+function lineageSummary(records, sessionFile) {
+    const currentIndex = findCurrentIndex(records, sessionFile);
+    const lineage = buildLineage(records, currentIndex);
+    const descendants = descendantRecords(records, sessionFile);
+    const leaves = leafRecords(records, descendants);
+    const recoverableLeaves = leafRecords(records, descendants, true).filter((record) => unavailableSessionSet().has(record.destinationSession));
+    const currentChildren = childRecords(records, sessionFile);
+    const forks = forkRecords(records, lineage);
+    const isLatestLeaf = Boolean(sessionFile && currentIndex >= 0 && !currentChildren.length);
+    const newestLeaf = newestRecord(leaves);
+    const longestLeaf = longestLineageLeaf(records, leaves);
+    return [
+        `Current session tracked: ${currentIndex >= 0 ? "yes" : "no"}`,
+        `Current session is latest leaf: ${isLatestLeaf ? "yes" : "no"}`,
+        `Children from current session: ${currentChildren.length}`,
+        `Descendants from current session: ${descendants.length}`,
+        `Active descendant leaves: ${leaves.length}`,
+        `Recoverable moved/superseded leaves: ${recoverableLeaves.length}`,
+        `Forks from current chain: ${forks.length}`,
+        ...formatLeaf("Newest descendant leaf", newestLeaf),
+        ...formatLeaf("Longest-lineage descendant leaf", longestLeaf),
+        ...(recoverableLeaves.length ? ["Recoverable leaves are hidden from normal resume suggestions; use /session-lineage --files for raw paths."] : []),
+        ...threadResumeLines(sessionFile),
+        ...(descendants.length ? [`Restart latest script: ${restartCommand()}`] : []),
+    ];
+}
+function formatHop(record, index, currentSession, files = false) {
+    const current = record.destinationSession === currentSession ? " current" : "";
+    const lines = [
+        `${index}. [${recordMarker(record)}] ${cwdLabel(record.fromCwd)} -> ${cwdLabel(record.toCwd)}${current}`,
+        `   ${record.ts}`,
+    ];
+    if (files) {
+        if (record.sourceSessionId || record.destinationSessionId)
+            lines.push(`   session id: ${record.destinationSessionId ?? record.sourceSessionId}`);
+        lines.push(`   source: ${shortPath(record.sourceSession)}`);
+        lines.push(`   dest:   ${shortPath(record.destinationSession)}`);
+    }
+    return lines;
+}
+async function buildStatusOutput(ctx, showAll = false) {
+    const sessionFile = ctx.sessionManager?.getSessionFile?.();
+    const records = await readManifest();
+    const lineageNames = await readLineageNames();
+    const discovered = await findRelocatedSessions();
+    const byDestination = new Map(records.map((record) => [record.destinationSession, record]));
+    const currentIndex = findCurrentIndex(records, sessionFile);
+    const currentLineage = buildLineage(records, currentIndex);
+    const currentName = latestLineageName(lineageNames, lineageRoot(currentLineage, sessionFile), sessionFile);
+    const forks = forkRecords(records, currentLineage);
+    const unrecorded = discovered.filter((path) => !byDestination.has(path));
+    const lines = [
+        "Session move status",
+        "",
+        `Current cwd: ${shortPath(ctx.cwd ?? "")}`,
+        `Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
+        `Current session id: ${ctx.sessionManager?.getSessionId?.() ?? "unknown"}`,
+        `Current lineage name: ${currentName?.name ?? "(unnamed)"}`,
+        `Current session tracked: ${currentIndex >= 0 ? `yes (#${currentIndex + 1})` : "no"}`,
+        ...movedWarningLines(sessionFile),
+        `Manifest records: ${records.length}`,
+        `Manifest inputs: ${manifestFiles().map(shortPath).join(", ")}`,
+        `Lineage inputs: ${lineageNamesFiles().map(shortPath).join(", ")}`,
+        `Restart scripts: ${shortPath(relocationScriptsDir())}`,
+        `Legacy restart scripts: ${shortPath(legacyRelocationScriptsDir())}`,
+        `Current lineage hops: ${currentLineage.length}`,
+        `Forks from current lineage: ${forks.length}`,
+        `Unrecorded relocated files: ${unrecorded.length}`,
+    ];
+    if (showAll) {
+        lines.push("", "All recorded relocations:");
+        for (const [index, record] of records.entries())
+            lines.push(...formatHop(record, index + 1, sessionFile, true));
+    }
+    return lines.join("\n");
+}
+async function buildLineageOutput(ctx, showFiles = false) {
+    const sessionFile = ctx.sessionManager?.getSessionFile?.();
+    const records = await readManifest();
+    const lineageNames = await readLineageNames();
+    const currentIndex = findCurrentIndex(records, sessionFile);
+    const lineage = buildLineage(records, currentIndex);
+    const currentName = latestLineageName(lineageNames, lineageRoot(lineage, sessionFile), sessionFile);
+    const forks = forkRecords(records, lineage);
+    const lines = [
+        "Session move lineage",
+        "",
+        `Current cwd: ${shortPath(ctx.cwd ?? "")}`,
+        `Current session: ${sessionFile ? shortPath(sessionFile) : "(ephemeral)"}`,
+        `Current session id: ${ctx.sessionManager?.getSessionId?.() ?? "unknown"}`,
+        `Lineage name: ${currentName?.name ?? "(unnamed)"}`,
+        ...movedWarningLines(sessionFile),
+        "",
+        "Current position:",
+        ...lineageSummary(records, sessionFile),
+    ];
+    if (!sessionFile)
+        lines.push("", "Current session is ephemeral; no lineage is available.");
+    else if (currentIndex < 0)
+        lines.push("", "Current session is not recorded as a relocation destination.");
+    else if (!lineage.length)
+        lines.push("", "No lineage records found for current session.");
+    else {
+        lines.push("", "Current chain:");
+        for (const [index, record] of lineage.entries())
+            lines.push(...formatHop(record, index + 1, sessionFile, showFiles));
+    }
+    if (forks.length) {
+        lines.push("", "Forks from this chain:");
+        for (const [index, record] of forks.entries())
+            lines.push(...formatHop(record, index + 1, sessionFile, showFiles));
+    }
+    return lines.join("\n");
+}
+export default function (pi) {
+    pi.registerTool({
+        name: "session_move",
+        label: "Session Move",
+        description: "Assistant-only diagnostics for session move status and lineage.",
+        promptSnippet: "Session-move diagnostics: use session_move status/lineage only when assistant context needs raw move-manifest state or latest-leaf checks.",
+        promptGuidelines: [
+            "Use session_move lineage to answer whether the current session has descendants, is a latest leaf, or should continue from a newer moved session.",
+            "This is an assistant diagnostic tool, not a user slash command; user-facing actions are /move, /lineage-name, and /move-prune.",
+        ],
+        parameters: Type.Object({
+            action: Type.Union([Type.Literal("status"), Type.Literal("lineage")]),
+            all: Type.Optional(Type.Boolean({ description: "For status, include all manifest records." })),
+            files: Type.Optional(Type.Boolean({ description: "For lineage, include source and destination session paths." })),
+        }),
+        async execute(_toolCallId, params, _signal, _updates, ctx) {
+            const text = params.action === "status" ? await buildStatusOutput(ctx, Boolean(params.all)) : await buildLineageOutput(ctx, Boolean(params.files));
+            return { content: [{ type: "text", text }], details: { action: params.action } };
+        },
+    });
+    pi.registerCommand("move", {
+        description: "Move this session to another cwd by replacing old path strings; restart Pi there with pi -c. Records lineage in relocations.jsonl. No LLM call. Use --verbose for file/script details.",
+        handler: async (args, ctx) => {
+            const { target, force, diverge, launch, shutdown, verbose } = parseArgs(args);
+            if (!target) {
+                ctx.ui.notify("Usage: /move [--launch] [--shutdown] [--diverge] [--verbose] [--force] <target-directory>", "error");
+                return;
+            }
+            const sessionFile = ctx.sessionManager.getSessionFile();
+            const sessionId = ctx.sessionManager.getSessionId();
+            if (!sessionFile) {
+                ctx.ui.notify("Cannot relocate an ephemeral session with no session file.", "error");
+                return;
+            }
+            const oldCwd = normalizeDir(ctx.cwd);
+            const targetCwd = normalizeDirArg(target, ctx.cwd);
+            try {
+                if (!(await ensureTargetDirectory(targetCwd, force, false, ctx.ui.confirm)))
+                    return;
+            }
+            catch (error) {
+                ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+                return;
+            }
+            if (oldCwd === targetCwd) {
+                ctx.ui.notify("Target directory is already the current Pi cwd.", "info");
+                return;
+            }
+            await ctx.waitForIdle();
+            if (!force) {
+                const ok = await ctx.ui.confirm("Move session?", [
+                    "This will write a moved session JSONL copy and replace path strings.",
+                    "It will not switch the live Pi process.",
+                    "",
+                    `From: ${oldCwd}`,
+                    `To:   ${targetCwd}`,
+                    `Mode: ${diverge ? "diverge (source remains active)" : "move (source marked superseded in store)"}`,
+                ].join("\n"));
+                if (!ok)
+                    return;
+            }
+            const original = await readFile(sessionFile, "utf8").catch((error) => {
+                if (error.code === "ENOENT") {
+                    throw new Error(["Current Pi session file is missing; cannot relocate this live process.", "", `Missing: ${sessionFile}`, "", "Try /session, /session-lineage --files, or start a fresh Pi session in the target directory."].join("\n"));
+                }
+                throw error;
+            });
+            let relocated = replaceAllLiteral(original, oldCwd, targetCwd);
+            // Handle rare JSON produced with escaped slashes.
+            relocated = replaceAllLiteral(relocated, oldCwd.replace(/\//g, "\\/"), targetCwd.replace(/\//g, "\\/"));
+            const replacements = original === relocated ? 0 : original.split(oldCwd).length - 1;
+            const agentDir = defaultAgentDir();
+            const destinationDir = join(agentDir, "sessions", sessionBucketName(targetCwd));
+            await mkdir(destinationDir, { recursive: true });
+            const destinationFile = join(destinationDir, uniqueRelocatedName(sessionFile));
+            await writeFile(destinationFile, relocated, { encoding: "utf8", flag: "wx" });
+            // `pi -c` chooses the most recently modified JSONL in the target cwd bucket.
+            // Touch the relocated current session immediately before writing restart guidance
+            // so the compact `cd <target>; pi -c` path selects this session without exposing
+            // the long --session path in normal output.
+            await utimes(destinationFile, new Date(), new Date());
+            const name = displayName(ctx);
+            const restart = await writeRestartScripts(targetCwd, destinationFile, sessionId, name);
+            const record = {
+                ts: new Date().toISOString(),
+                fromCwd: oldCwd,
+                toCwd: targetCwd,
+                sourceSession: sessionFile,
+                destinationSession: destinationFile,
+                parent: sessionFile,
+                replacements,
+                sourceSessionId: sessionId,
+                destinationSessionId: sessionId,
+                mode: diverge ? "diverge" : "move",
+                operationType: "session_relocation",
+                tool: "pi-session-move",
+                sourceLinesAtEvent: original.split("\n").filter((line) => line.trim()).length,
+                sourceBytesAtEvent: Buffer.byteLength(original),
+            };
+            await appendManifest(record);
+            let storeWarning;
+            try {
+                await appendStoreRecord(record, name);
+            }
+            catch (error) {
+                storeWarning = `Canonical store update failed; raw manifest was written. ${error instanceof Error ? error.message : String(error)}`;
+            }
+            let launchWarning;
+            if (launch) {
+                try {
+                    await launchInTerminal(restart.latestFile);
+                    if (shutdown)
+                        await ctx.shutdown?.();
+                }
+                catch (error) {
+                    launchWarning = `Terminal launch failed: ${error instanceof Error ? error.message : String(error)}`;
+                }
+            }
+            const command = `bash ${shellQuote(restart.latestFile)}`;
+            const lines = verbose ? [
+                `Moved session written with ${replacements} path-string rewrite${replacements === 1 ? "" : "s"}:`,
+                destinationFile,
+                "",
+                ...restartCommandBlock(restart.targetCwd),
+                "",
+                "Restart script still written for convenience:",
+                restart.scriptFile,
+                "Run script with:",
+                command,
+                "",
+                `mode: ${diverge ? "diverge" : "move"}`,
+                ...(name ? [`session name: ${name}`] : []),
+                ...(launch ? ["", launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []),
+                ...(storeWarning ? ["", storeWarning] : []),
+            ] : [
+                `Moved → ${targetCwd}`,
+                "",
+                ...restartCommandBlock(targetCwd),
+                "",
+                [`mode: ${diverge ? "diverge" : "move"}`, ...(name ? [`session name: ${name}`] : [])].join(" · "),
+                ...(launch || storeWarning ? ["", ...(launch ? [launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []), ...(storeWarning ? [storeWarning] : [])] : []),
+            ];
+            ctx.ui.notify(lines.join("\n"), "info");
+        },
+    });
+    pi.registerCommand("move-prune", {
+        description: "Safely move superseded source session files to Trash. Use --dry-run first.",
+        handler: async (args, ctx) => {
+            const dryRun = hasFlag(args, "--dry-run");
+            const force = hasFlag(args, "--force");
+            const stage = hasFlag(args, "--stage");
+            const duplicates = hasFlag(args, "--duplicates");
+            let candidates = await classifyPruneCandidates(ctx.sessionManager?.getSessionFile?.());
+            if (duplicates)
+                candidates = [...candidates, ...duplicatePruneCandidates(candidates, ctx.sessionManager?.getSessionFile?.())];
+            const eligible = candidates.filter((c) => c.category === "eligible" || (duplicates && force && c.category === "legacy-review"));
+            const legacy = candidates.filter((c) => c.category === "legacy-review" && !(duplicates && force));
+            const unsafe = candidates.filter((c) => c.category === "unsafe");
+            const preview = [
+                "Session move prune candidates",
+                "",
+                `Eligible: ${eligible.length}`,
+                `Legacy/manual review: ${legacy.length}`,
+                `Unsafe/skipped: ${unsafe.length}`,
+                "",
+                ...eligible.slice(0, 20).map((c) => `- ${shortPath(c.sourcePath)} -> ${stage ? "stage" : "Trash"} (${c.reason})`),
+                ...(eligible.length > 20 ? [`- ... ${eligible.length - 20} more eligible`] : []),
+                ...(legacy.length ? ["", "Legacy/manual review:", ...legacy.slice(0, 10).map((c) => `- ${shortPath(c.sourcePath)} (${c.reason})`)] : []),
+                ...(unsafe.length ? ["", "Unsafe/skipped:", ...unsafe.slice(0, 10).map((c) => `- ${shortPath(c.sourcePath)} (${c.reason})`)] : []),
+            ].join("\n");
+            if (dryRun) {
+                ctx.ui.notify(`${preview}\n\nDry run only; no files were moved.`, "info");
+                return;
+            }
+            if (!eligible.length) {
+                ctx.ui.notify(`${preview}\n\nNo eligible files to prune.`, "info");
+                return;
+            }
+            if (!force) {
+                const ok = await ctx.ui.confirm("Move superseded session files to Trash?", `${preview}\n\nThis moves eligible files to ~/.Trash and records prune_operations in the store. It does not permanently delete files.`);
+                if (!ok)
+                    return;
+            }
+            let trashed = 0;
+            let failed = 0;
+            const failures = [];
+            const stageBatch = scriptStamp();
+            for (const candidate of eligible) {
+                try {
+                    const trashPath = stage ? await uniqueStagePath(candidate.sourcePath, stageBatch) : await uniqueTrashPath(candidate.sourcePath);
+                    await rename(candidate.sourcePath, trashPath);
+                    recordPruneOperation(candidate, stage ? "staged" : "trashed", stage ? "stage" : "trash", candidate.reason, trashPath);
+                    trashed++;
+                }
+                catch (error) {
+                    failed++;
+                    const reason = error instanceof Error ? error.message : String(error);
+                    recordPruneOperation(candidate, "failed", "trash", reason);
+                    failures.push(`${shortPath(candidate.sourcePath)}: ${reason}`);
+                }
+            }
+            ctx.ui.notify(["Session move prune complete", "", `${stage ? "Staged" : "Trashed"}: ${trashed}`, ...(stage ? [`Stage batch: ${join(defaultAgentDir(), "session-archive", "to-delete", stageBatch)}`] : []), `Failed: ${failed}`, `Legacy/manual review skipped: ${legacy.length}`, `Unsafe skipped: ${unsafe.length}`, ...(failures.length ? ["", "Failures:", ...failures.slice(0, 10)] : [])].join("\n"), failed ? "warning" : "info");
+        },
+    });
+    pi.registerCommand("lineage-name", {
+        description: "Pin a durable name for the current session lineage branch.",
+        handler: async (args, ctx) => {
+            const name = parseWords(args).join(" ").trim();
+            if (!name) {
+                ctx.ui.notify("Usage: /lineage-name <name>", "error");
+                return;
+            }
+            const sessionFile = ctx.sessionManager.getSessionFile();
+            const records = await readManifest();
+            const currentIndex = findCurrentIndex(records, sessionFile);
+            const lineage = buildLineage(records, currentIndex);
+            const root = lineageRoot(lineage, sessionFile);
+            if (!root) {
+                ctx.ui.notify("Cannot name an ephemeral lineage with no session file.", "error");
+                return;
+            }
+            const now = new Date().toISOString();
+            await appendLineageName({ type: "lineage_named", root, name, currentSession: sessionFile, sessionId: ctx.sessionManager.getSessionId(), created: now, updated: now, source: "pi-session-move" });
+            const sessionManager = ctx.sessionManager;
+            const sessionNameEntry = typeof sessionManager.appendSessionInfo === "function" ? sessionManager.appendSessionInfo(name) : undefined;
+            ctx.ui.notify([
+                "Session lineage name pinned",
+                "",
+                `Pinned lineage name: ${name}`,
+                ...(sessionNameEntry ? [`Pi session display name updated: ${name}`] : ["Pi session display name was not updated; this Pi version does not expose appendSessionInfo to extensions."]),
+                `Root: ${shortPath(root)}`,
+                `Metadata: ${shortPath(lineageNamesFile())}`,
+            ].join("\n"), "info");
+        },
+    });
+}
+//# sourceMappingURL=index.js.map
