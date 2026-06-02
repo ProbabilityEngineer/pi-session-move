@@ -157,7 +157,7 @@ List the highest-message surviving session for each named lineage with:
 npm run lineages
 ```
 
-The output shows one row per lineage with message count, age, session count, resume cwd, and session path. To print the shell commands for a row:
+The output shows one row per lineage with Pi's own resume message count, age, session count, resume cwd, and session path. To print the shell commands for a row:
 
 ```bash
 npm run lineages -- 1

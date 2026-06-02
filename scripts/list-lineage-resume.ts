@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-import { readdir, readFile, stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { SessionManager, type SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 
 const home = process.env.HOME ?? ".";
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(home, ".pi", "agent");
 
 type RelocationRecord = { ts?: string; sourceSession?: string; destinationSession?: string; parent?: string; fromCwd?: string; toCwd?: string };
 type LineageNameRecord = { type?: string; root?: string; name?: string; currentSession?: string; updated?: string };
-type SessionInfo = { path: string; messages: number; mtimeMs: number; cwd?: string };
+type ResumeSessionInfo = { path: string; messages: number; mtimeMs: number; cwd?: string };
 
 async function readJsonl<T>(path: string): Promise<T[]> {
 	try {
@@ -26,12 +27,6 @@ function shortPath(path: string | undefined): string {
 	return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
 }
 
-function cwdFromSessionBucket(path: string): string | undefined {
-	const bucket = basename(dirname(path));
-	const match = bucket.match(/^--(.+)--$/);
-	return match ? `/${match[1].replace(/-/g, "/")}` : undefined;
-}
-
 function formatAge(ms: number): string {
 	const delta = Math.max(0, Date.now() - ms);
 	const minute = 60_000;
@@ -42,22 +37,8 @@ function formatAge(ms: number): string {
 	return `${Math.round(delta / day)}d`;
 }
 
-async function lineCount(path: string): Promise<number> {
-	try {
-		return (await readFile(path, "utf8")).split(/\r?\n/).filter((line) => line.trim()).length;
-	} catch {
-		return 0;
-	}
-}
-
-async function sessionInfo(path: string, cwdBySession: Map<string, string>): Promise<SessionInfo | undefined> {
-	try {
-		const st = await stat(path);
-		if (!st.isFile()) return undefined;
-		return { path, messages: await lineCount(path), mtimeMs: st.mtimeMs, cwd: cwdBySession.get(path) ?? cwdFromSessionBucket(path) };
-	} catch {
-		return undefined;
-	}
+function toResumeSessionInfo(session: PiSessionInfo, cwdBySession: Map<string, string>): ResumeSessionInfo {
+	return { path: session.path, messages: session.messageCount, mtimeMs: session.modified.getTime(), cwd: cwdBySession.get(session.path) ?? session.cwd };
 }
 
 function descendants(root: string, records: RelocationRecord[]): string[] {
@@ -99,11 +80,13 @@ async function main() {
 		if (record.sourceSession && record.fromCwd) cwdBySession.set(record.sourceSession, record.fromCwd);
 		if (record.destinationSession && record.toCwd) cwdBySession.set(record.destinationSession, record.toCwd);
 	}
-	const rows: { name: string; best: SessionInfo; count: number }[] = [];
+	const piSessions = await SessionManager.listAll();
+	const piSessionByPath = new Map(piSessions.map((session) => [session.path, toResumeSessionInfo(session, cwdBySession)]));
+	const rows: { name: string; best: ResumeSessionInfo; count: number }[] = [];
 	for (const lineage of latestByName.values()) {
 		const anchor = lineage.currentSession ?? lineage.root!;
 		const paths = uniq([...descendants(anchor, records), anchor].filter(Boolean));
-		const infos = (await Promise.all(paths.map((path) => sessionInfo(path, cwdBySession)))).filter(Boolean) as SessionInfo[];
+		const infos = paths.map((path) => piSessionByPath.get(path)).filter(Boolean) as ResumeSessionInfo[];
 		const best = infos.sort((a, b) => b.messages - a.messages || b.mtimeMs - a.mtimeMs)[0];
 		if (best) rows.push({ name: lineage.name!, best, count: infos.length });
 	}

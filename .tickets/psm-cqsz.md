@@ -19,3 +19,9 @@ Add a CLI/script that lists only the highest message-count session for each name
 - Ranking chooses highest messageCount per lineage.
 - TypeScript check passes.
 
+
+## Notes
+
+**2026-06-02T06:18:45Z**
+
+Follow-up: changed lineages script to use Pi's SessionManager.listAll() metadata (`messageCount`, `modified`, `cwd`) instead of reading/counting session JSONL files itself, matching /resume semantics.
