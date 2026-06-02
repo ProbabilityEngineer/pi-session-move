@@ -6,8 +6,48 @@ Filesystem repo moves live in `pi-repo-move` (`/repo-move <target>`).
 
 ## Install
 
+Install the Pi extension with:
+
 ```bash
 pi install git:github.com/ProbabilityEngineer/pi-session-move
+```
+
+The package also includes a small CLI, `pil`, for listing the highest-message session in each named lineage and launching Pi from the selected row. Normal npm installs expose package `bin` entries on PATH:
+
+```bash
+npm install -g pi-session-move
+which pil
+```
+
+With npm, the `pil` shim is written to npm's global bin directory, normally:
+
+```text
+$(npm prefix -g)/bin/pil
+```
+
+For example with nvm this may be:
+
+```text
+~/.nvm/versions/node/<version>/bin/pil
+```
+
+Pi git package installs currently clone the package under:
+
+```text
+~/.pi/agent/git/github.com/ProbabilityEngineer/pi-session-move/
+```
+
+but Pi does not currently guarantee that package `bin` entries are linked onto your shell PATH. If you install via Pi git and want `pil` globally, create a user shim in a PATH directory such as `~/.pi/agent/bin`:
+
+```bash
+mkdir -p ~/.pi/agent/bin
+ln -sfn ~/.pi/agent/git/github.com/ProbabilityEngineer/pi-session-move/bin/pi-session-lineages.js ~/.pi/agent/bin/pil
+```
+
+Ensure this is in your shell startup PATH:
+
+```bash
+export PATH="$HOME/.pi/agent/bin:$PATH"
 ```
 
 Local testing:
