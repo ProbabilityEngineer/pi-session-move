@@ -29,7 +29,7 @@
 		"migrate-paths:move": "tsx scripts/migrate-session-move-paths.ts --move"
 	},
 	"bin": {
-		"pi-session-lineages": "./bin/pi-session-lineages.js"
+		"pil": "./bin/pi-session-lineages.js"
 	},
 	"files": [
 		"index.ts",

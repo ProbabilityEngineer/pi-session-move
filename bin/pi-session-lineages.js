@@ -55,6 +55,7 @@ function descendants(root, records) {
 }
 
 async function main() {
+	const showFiles = process.argv.includes("--files") || process.argv.includes("--verbose");
 	const limitArg = process.argv.find((arg) => arg.startsWith("--limit="));
 	const limit = limitArg ? Number(limitArg.slice("--limit=".length)) : undefined;
 	const relocationFiles = [
@@ -95,10 +96,10 @@ async function main() {
 		console.log(`pi --session ${JSON.stringify(row.best.path)}`);
 		return;
 	}
-	console.log("#  Lineage                         Msgs  Age  Sessions  Cwd");
+	console.log("#  Lineage                         Msgs  Age  Cwd");
 	for (const [index, row] of rows.slice(0, limit).entries()) {
-		console.log(`${String(index + 1).padStart(2)} ${row.name.padEnd(30).slice(0, 30)} ${String(row.best.messages).padStart(5)} ${formatAge(row.best.mtimeMs).padStart(4)} ${String(row.count).padStart(8)}  ${shortPath(row.best.cwd)}`);
-		console.log(`   session: ${shortPath(row.best.path)}`);
+		console.log(`${String(index + 1).padStart(2)} ${row.name.padEnd(30).slice(0, 30)} ${String(row.best.messages).padStart(5)} ${formatAge(row.best.mtimeMs).padStart(4)}  ${shortPath(row.best.cwd)}`);
+		if (showFiles) console.log(`   session: ${shortPath(row.best.path)}`);
 	}
 }
 

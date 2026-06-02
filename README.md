@@ -154,7 +154,7 @@ When Pi exposes session naming APIs, `/lineage-name` also appends the pinned lin
 List the highest-message surviving session for each named lineage with:
 
 ```bash
-pi-session-lineages
+pil
 ```
 
 From the source checkout, the equivalent npm script is:
@@ -163,10 +163,10 @@ From the source checkout, the equivalent npm script is:
 npm run lineages
 ```
 
-The output shows one row per lineage with Pi's own resume message count, age, session count, resume cwd, and session path. To print the shell commands for a row:
+The output shows one compact row per lineage with Pi's own resume message count, age, and resume cwd. Use `--files` to include full session paths. To print the shell commands for a row:
 
 ```bash
-pi-session-lineages 1
+pil 1
 # or: npm run lineages -- 1
 ```
 
