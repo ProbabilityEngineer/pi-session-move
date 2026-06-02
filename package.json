@@ -20,7 +20,8 @@
 		]
 	},
 	"devDependencies": {
-		"@types/node": "^25.9.1"
+		"@types/node": "^25.9.1",
+		"tsx": "^4.22.4"
 	},
 	"scripts": {
 		"migrate-paths": "tsx scripts/migrate-session-move-paths.ts"
