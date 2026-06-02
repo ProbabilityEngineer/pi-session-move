@@ -70,6 +70,18 @@ function descendants(root: string, records: RelocationRecord[]): string[] {
 	return [...out];
 }
 
+function nearestName(path: string, parentBySession: Map<string, string>, nameByAnchor: Map<string, string>): string | undefined {
+	const seen = new Set<string>();
+	let current: string | undefined = path;
+	while (current && !seen.has(current)) {
+		seen.add(current);
+		const name = nameByAnchor.get(current);
+		if (name) return name;
+		current = parentBySession.get(current);
+	}
+	return undefined;
+}
+
 async function main() {
 	const args = process.argv.slice(2);
 	const showFiles = args.includes("--files") || args.includes("--verbose");
@@ -90,17 +102,22 @@ async function main() {
 		.sort((a, b) => String(a.updated ?? "").localeCompare(String(b.updated ?? "")));
 	const latestByName = new Map<string, LineageNameRecord>();
 	for (const name of names) latestByName.set(name.name!, name);
+	const nameByAnchor = new Map<string, string>();
+	for (const name of latestByName.values()) nameByAnchor.set(name.currentSession ?? name.root!, name.name!);
 	const cwdBySession = new Map<string, string>();
+	const parentBySession = new Map<string, string>();
 	for (const record of records) {
 		if (record.sourceSession && record.fromCwd) cwdBySession.set(record.sourceSession, record.fromCwd);
 		if (record.destinationSession && record.toCwd) cwdBySession.set(record.destinationSession, record.toCwd);
+		if (record.destinationSession) parentBySession.set(record.destinationSession, record.sourceSession ?? record.parent ?? "");
 	}
 	const piSessions = await SessionManager.listAll();
 	const piSessionByPath = new Map(piSessions.map((session) => [session.path, toResumeSessionInfo(session, cwdBySession)]));
 	const rows: { name: string; best: ResumeSessionInfo; count: number }[] = [];
 	for (const lineage of latestByName.values()) {
 		const anchor = lineage.currentSession ?? lineage.root!;
-		const paths = uniq([...descendants(anchor, records), anchor].filter(Boolean));
+		const paths = uniq([...descendants(anchor, records), anchor].filter(Boolean))
+			.filter((path) => nearestName(path, parentBySession, nameByAnchor) === lineage.name);
 		const infos = paths.map((path) => piSessionByPath.get(path)).filter(Boolean) as ResumeSessionInfo[];
 		const best = infos.sort((a, b) => b.messages - a.messages || b.mtimeMs - a.mtimeMs)[0];
 		if (best) rows.push({ name: lineage.name!, best, count: infos.length });
