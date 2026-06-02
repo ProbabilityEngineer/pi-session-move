@@ -1009,11 +1009,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "session_move",
 		label: "Session Move",
-		description: "Pi session move status and lineage: status/lineage.",
-		promptSnippet: "Session-move routing: use session_move status/lineage when checking whether the current Pi session is an older moved branch or latest lineage leaf.",
+		description: "Assistant-only diagnostics for session move status and lineage.",
+		promptSnippet: "Session-move diagnostics: use session_move status/lineage only when assistant context needs raw move-manifest state or latest-leaf checks.",
 		promptGuidelines: [
 			"Use session_move lineage to answer whether the current session has descendants, is a latest leaf, or should continue from a newer moved session.",
-			"Session move status/lineage are read-only; use slash /move for the user-confirmed session move operation.",
+			"This is an assistant diagnostic tool, not a user slash command; user-facing actions are /move, /lineage-name, and /move-prune.",
 		],
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("status"), Type.Literal("lineage")]),
@@ -1028,7 +1028,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("move", {
 		description:
-			"Relocate this session to another cwd by replacing old path strings; restart Pi there with pi -c. Records lineage in relocations.jsonl. No LLM call. Use --verbose for file/script details.",
+			"Move this session to another cwd by replacing old path strings; restart Pi there with pi -c. Records lineage in relocations.jsonl. No LLM call. Use --verbose for file/script details.",
 		handler: async (args, ctx) => {
 			const { target, force, diverge, launch, shutdown, verbose } = parseArgs(args);
 			if (!target) {
@@ -1061,9 +1061,9 @@ export default function (pi: ExtensionAPI) {
 
 			if (!force) {
 				const ok = await ctx.ui.confirm(
-					"Relocate session?",
+					"Move session?",
 					[
-						"This will write a relocated session JSONL and replace path strings.",
+						"This will write a moved session JSONL copy and replace path strings.",
 						"It will not switch the live Pi process.",
 						"",
 						`From: ${oldCwd}`,
@@ -1138,7 +1138,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			const command = `bash ${shellQuote(restart.latestFile)}`;
 			const lines = verbose ? [
-				`Relocated session written with ${replacements} path-string rewrite${replacements === 1 ? "" : "s"}:`,
+				`Moved session written with ${replacements} path-string rewrite${replacements === 1 ? "" : "s"}:`,
 				destinationFile,
 				"",
 				...restartCommandBlock(restart.targetCwd),
@@ -1153,7 +1153,7 @@ export default function (pi: ExtensionAPI) {
 				...(launch ? ["", launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []),
 				...(storeWarning ? ["", storeWarning] : []),
 			] : [
-				`Relocated → ${targetCwd}`,
+				`Moved → ${targetCwd}`,
 				"",
 				...restartCommandBlock(targetCwd),
 				"",
@@ -1165,7 +1165,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("move-prune", {
-		description: "Safely move superseded relocation source session files to Trash. Use --dry-run first.",
+		description: "Safely move superseded source session files to Trash. Use --dry-run first.",
 		handler: async (args, ctx) => {
 			const dryRun = hasFlag(args, "--dry-run");
 			const force = hasFlag(args, "--force");

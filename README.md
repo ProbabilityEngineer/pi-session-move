@@ -24,10 +24,21 @@ pi -e ./index.ts
 /move-prune [--dry-run] [--stage] [--duplicates] [--force]
 ```
 
+## Assistant diagnostic tool
+
+The extension also exposes an assistant-only `session_move` tool for raw move-manifest diagnostics:
+
+```text
+session_move status
+session_move lineage
+```
+
+This is not a user slash command. User-facing actions are `/move`, `/lineage-name`, and `/move-prune`.
+
 ## Which command should I use?
 
 - Use `/move` to copy the current live session to another cwd bucket and write restart guidance.
-- Use `pi-repo-move`'s `/repo-move <target>` to move the current repo directory on disk and relocate its session history.
+- Use `pi-repo-move`'s `/repo-move <target>` to move the current repo directory on disk and preserve its session history.
 - Use `/lineage-name <name>` to pin a durable name for the current lineage branch.
 - Use `/move-prune --dry-run` to preview cleanup of superseded source session files.
 
@@ -100,7 +111,7 @@ Canonical SQLite store:
 ~/.pi/agent/session-store/session-store.sqlite
 ```
 
-The manifest is append-only and is not rewritten. This extension records session move/restart facts and keeps status, lineage, and prune self-contained for operational use. Canonical replay, rebuild, export, graphing, and reports live in `agent-session-store`, `pi-session-store`, and `pi-session-graph`.
+The manifest is append-only and is not rewritten. This extension records session move/restart facts and keeps move, lineage naming, and prune self-contained for operational use. Canonical replay, rebuild, export, graphing, and reports live in `agent-session-store` and `pi-session-graph`.
 
 ## Pruning
 
@@ -142,7 +153,7 @@ When Pi exposes session naming APIs, `/lineage-name` also appends the pinned lin
 
 ## Legacy evidence copy
 
-Legacy files are not rewritten or deleted. To copy old top-level relocation evidence into a tidy namespace for archival review, run:
+Legacy files are not rewritten or deleted. To copy old top-level move evidence into a tidy namespace for archival review, run:
 
 ```bash
 npm run migrate-paths
@@ -158,7 +169,7 @@ and writes checksums to `migration-manifest.jsonl`.
 
 ## Boundaries
 
-- `pi-session-move`: current session moves, restart guidance, local status/lineage/prune.
-- `pi-repo-move`: filesystem repo directory moves and repo bucket relocation.
-- `agent-session-store` / `pi-session-store`: canonical rebuild/export/report workflows.
+- `pi-session-move`: current session moves, restart guidance, lineage naming, and prune.
+- `pi-repo-move`: filesystem repo directory moves and repo bucket session preservation.
+- `agent-session-store`: canonical rebuild/export/report workflows.
 - `pi-session-graph`: visualization over prepared graph exports.
