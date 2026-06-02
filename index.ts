@@ -131,7 +131,7 @@ type LineageNameRecord = {
 	sessionId?: string;
 	created: string;
 	updated: string;
-	source: "pi-session-move";
+	source: "pi-session-move" | "pi-session-move:auto-pin-session-name";
 };
 
 async function appendManifest(record: RelocationRecord): Promise<void> {
@@ -550,6 +550,13 @@ function displayName(ctx: any): string | undefined {
 	return candidates[0];
 }
 
+function usableSessionName(name: string | undefined): string | undefined {
+	const trimmed = name?.trim();
+	if (!trimmed) return undefined;
+	if (["new session", "untitled", "unnamed", "default"].includes(trimmed.toLowerCase())) return undefined;
+	return trimmed;
+}
+
 async function launchInTerminal(scriptFile: string): Promise<void> {
 	await execFileAsync("osascript", ["-e", `tell application "Terminal" to do script ${JSON.stringify(`bash ${shellQuote(scriptFile)}`)}`, "-e", `tell application "Terminal" to activate`]);
 }
@@ -792,17 +799,35 @@ function currentSessionLineageName(names: LineageNameRecord[], sessionFile?: str
 	return [...names].filter((record) => record.currentSession === sessionFile).sort((a, b) => a.updated.localeCompare(b.updated)).at(-1);
 }
 
-function splitNameWarningLines(lineageNames: LineageNameRecord[], sessionFile: string | undefined, forks: RelocationRecord[], currentName: LineageNameRecord | undefined): string[] {
+function branchNameSuggestion(baseName: string | undefined, sessionFile: string | undefined, cwd?: string) {
+	const suffix = cwd ? basename(cwd) : sessionFile ? cwdLabel(sessionFile) : "branch";
+	return `${baseName && baseName !== "(unnamed)" ? baseName : "lineage"} / ${suffix}`;
+}
+
+function splitNameWarningLines(lineageNames: LineageNameRecord[], sessionFile: string | undefined, forks: RelocationRecord[], currentName: LineageNameRecord | undefined, cwd?: string): string[] {
 	if (!sessionFile || !forks.length) return [];
 	if (currentSessionLineageName(lineageNames, sessionFile)) return [];
 	const name = currentName?.name ?? "(unnamed)";
+	const diverges = forks.filter((record) => record.mode === "diverge").length;
+	const suggested = branchNameSuggestion(name, sessionFile, cwd);
 	return [
 		"",
 		"Lineage split naming:",
-		`- This lineage has ${forks.length} recorded fork${forks.length === 1 ? "" : "s"}; the current branch is sharing pinned lineage name ${name} from an ancestor/root.`,
+		`- This lineage has ${forks.length} recorded fork${forks.length === 1 ? "" : "s"}${diverges ? `, including ${diverges} explicit diverge/branch edge${diverges === 1 ? "" : "s"}` : ""}; the current branch is sharing pinned lineage name ${name} from an ancestor/root.`,
 		"- Give this branch its own pinned name if it is now separate work:",
-		"  /move-lineage --name <new-branch-name>",
+		`  /move-lineage --name ${suggested}`,
 	];
+}
+
+async function autoPinLineageNameFromSession(ctx: any, lineageNames: LineageNameRecord[], root?: string, sessionFile?: string): Promise<LineageNameRecord | undefined> {
+	if (!root || !sessionFile || latestLineageName(lineageNames, root, sessionFile)) return undefined;
+	const name = usableSessionName(displayName(ctx));
+	if (!name) return undefined;
+	const now = new Date().toISOString();
+	const record: LineageNameRecord = { type: "lineage_named", root, name, currentSession: sessionFile, sessionId: ctx.sessionManager?.getSessionId?.(), created: now, updated: now, source: "pi-session-move:auto-pin-session-name" };
+	await appendLineageName(record);
+	lineageNames.push(record);
+	return record;
 }
 
 function childRecords(records: RelocationRecord[], sessionFile?: string): RelocationRecord[] {
@@ -1207,7 +1232,9 @@ export default function (pi: ExtensionAPI) {
 			const byDestination = new Map(records.map((record) => [record.destinationSession, record]));
 			const currentIndex = findCurrentIndex(records, sessionFile);
 			const currentLineage = buildLineage(records, currentIndex);
-			const currentName = latestLineageName(lineageNames, lineageRoot(currentLineage, sessionFile), sessionFile);
+			const root = lineageRoot(currentLineage, sessionFile);
+			await autoPinLineageNameFromSession(ctx, lineageNames, root, sessionFile);
+			const currentName = latestLineageName(lineageNames, root, sessionFile);
 			const forks = forkRecords(records, currentLineage);
 			const unrecorded = discovered.filter((path) => !byDestination.has(path));
 			const currentSessionId = ctx.sessionManager.getSessionId();
@@ -1245,7 +1272,7 @@ export default function (pi: ExtensionAPI) {
 				lines.push("", "Forks touching current lineage:");
 				for (const [index, record] of forks.slice(-5).entries()) lines.push(...formatHop(record, index + 1, sessionFile, false));
 			}
-			lines.push(...splitNameWarningLines(lineageNames, sessionFile, forks, currentName));
+			lines.push(...splitNameWarningLines(lineageNames, sessionFile, forks, currentName, ctx.cwd));
 
 			if (showAll) {
 				lines.push("", "All recorded relocations:");
@@ -1276,6 +1303,7 @@ export default function (pi: ExtensionAPI) {
 			const currentIndex = findCurrentIndex(records, sessionFile);
 			const lineage = buildLineage(records, currentIndex);
 			const root = lineageRoot(lineage, sessionFile);
+			if (!name) await autoPinLineageNameFromSession(ctx, lineageNames, root, sessionFile);
 			if (name) {
 				if (!root) {
 					ctx.ui.notify("Cannot name an ephemeral lineage with no session file.", "error");
@@ -1322,7 +1350,7 @@ export default function (pi: ExtensionAPI) {
 				lines.push("", "Forks from this chain:");
 				for (const [index, record] of forks.entries()) lines.push(...formatHop(record, index + 1, sessionFile, showFiles));
 			}
-			lines.push(...splitNameWarningLines(lineageNames, sessionFile, forks, currentName));
+			lines.push(...splitNameWarningLines(lineageNames, sessionFile, forks, currentName, ctx.cwd));
 
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
