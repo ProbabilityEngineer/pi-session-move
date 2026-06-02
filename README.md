@@ -6,7 +6,13 @@ Filesystem repo moves live in `pi-repo-move` (`/repo-move <target>`).
 
 ## Install
 
-Install the Pi extension with:
+Install from npm:
+
+```bash
+pi install npm:pi-session-move
+```
+
+Install from GitHub:
 
 ```bash
 pi install git:github.com/ProbabilityEngineer/pi-session-move
