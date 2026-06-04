@@ -161,24 +161,9 @@ async function main() {
         const paths = uniq([...descendants(anchor, records), anchor, ...storeNamedPaths].filter(Boolean))
             .filter((path) => storeNameByPath.get(path) === lineage.name || nearestName(path, parentBySession, nameByAnchor) === lineage.name);
         const infos = paths.map((path) => piSessionByPath.get(path)).filter(Boolean);
-        const byCwd = new Map();
-        for (const info of infos) {
-            const key = info.cwd ?? "";
-            const list = byCwd.get(key) ?? [];
-            list.push(info);
-            byCwd.set(key, list);
-        }
-        const groups = [...byCwd.values()].map((group) => ({
-            infos: group,
-            totalMessages: group.reduce((sum, info) => sum + info.messages, 0),
-            latestMtimeMs: Math.max(...group.map((info) => info.mtimeMs)),
-        }));
-        const topGroup = groups.sort((a, b) => b.totalMessages - a.totalMessages || b.latestMtimeMs - a.latestMtimeMs)[0];
-        if (!topGroup)
-            continue;
-        const best = topGroup.infos.sort((a, b) => b.mtimeMs - a.mtimeMs || b.messages - a.messages)[0];
+        const best = infos.sort((a, b) => b.messages - a.messages || b.mtimeMs - a.mtimeMs)[0];
         if (best)
-            rows.push({ name: lineage.name, best, count: infos.length, totalMessages: topGroup.totalMessages });
+            rows.push({ name: lineage.name, best, count: infos.length, totalMessages: best.messages });
     }
     rows.sort((a, b) => b.totalMessages - a.totalMessages || b.best.mtimeMs - a.best.mtimeMs);
     const selected = Number(args.find((arg) => /^\d+$/.test(arg)) ?? 0);
