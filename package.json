@@ -1,55 +1,55 @@
 {
-	"name": "pi-session-move",
-	"version": "0.1.7",
-	"private": false,
-	"description": "Move the current Pi session context to another working directory without invoking the LLM.",
-	"type": "module",
-	"keywords": [
-		"pi-package",
-		"pi-extension",
-		"pi",
-		"move",
-		"session",
-		"relocate",
-		"lineage"
-	],
-	"homepage": "https://github.com/ProbabilityEngineer/pi-session-move#readme",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/ProbabilityEngineer/pi-session-move.git"
-	},
-	"bugs": {
-		"url": "https://github.com/ProbabilityEngineer/pi-session-move/issues"
-	},
-	"dependencies": {
-		"@earendil-works/pi-coding-agent": "^0.75.3",
-		"typebox": "latest"
-	},
-	"pi": {
-		"extensions": [
-			"./dist/index.js"
-		]
-	},
-	"devDependencies": {
-		"@types/node": "^25.9.1",
-		"tsx": "^4.22.4"
-	},
-	"scripts": {
-		"lineages": "tsx scripts/list-lineage-resume.ts",
-		"migrate-paths": "tsx scripts/migrate-session-move-paths.ts",
-		"migrate-paths:move": "tsx scripts/migrate-session-move-paths.ts --move",
-		"build": "tsc --project tsconfig.json",
-		"lint": "tsc --noEmit"
-	},
-	"bin": {
-		"pil": "dist/scripts/list-lineage-resume.js"
-	},
-	"files": [
-		"dist",
-		"README.md",
-		"LICENSE",
-		"tsconfig.json"
-	],
-	"main": "dist/index.js",
-	"types": "dist/index.d.ts"
+  "name": "pi-session-move",
+  "version": "0.1.8",
+  "private": false,
+  "description": "Move the current Pi session context to another working directory without invoking the LLM.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "move",
+    "session",
+    "relocate",
+    "lineage"
+  ],
+  "homepage": "https://github.com/ProbabilityEngineer/pi-session-move#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ProbabilityEngineer/pi-session-move.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ProbabilityEngineer/pi-session-move/issues"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.75.3",
+    "typebox": "latest"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.4"
+  },
+  "scripts": {
+    "lineages": "tsx scripts/list-lineage-resume.ts",
+    "migrate-paths": "tsx scripts/migrate-session-move-paths.ts",
+    "migrate-paths:move": "tsx scripts/migrate-session-move-paths.ts --move",
+    "build": "tsc --project tsconfig.json",
+    "lint": "tsc --noEmit"
+  },
+  "bin": {
+    "pil": "dist/scripts/list-lineage-resume.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "tsconfig.json"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts"
 }

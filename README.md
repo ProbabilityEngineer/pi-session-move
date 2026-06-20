@@ -1,5 +1,7 @@
 # pi-session-move
 
+> One of my diet context engineering and workflow extensions. Add pi-diet-LSP, pi-diet-Ripgrep, pi-repo-move and others from [npm](https://www.npmjs.com/~probabilityengineer).
+
 Pi extension for moving the current Pi session context to another working directory. It does **not** move repositories on disk and does **not** invoke the LLM.
 
 Filesystem repo moves live in `pi-repo-move` (`/repo-move <target>`).
