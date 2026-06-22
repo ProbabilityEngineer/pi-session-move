@@ -1030,7 +1030,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("move", {
 		description:
-			"Move this session to another cwd by replacing old path strings; restart Pi there with pi -c. Records lineage in ~/.pi/agent/session-move/manifests/relocations.jsonl. Deprecated legacy manifest paths remain readable for compatibility. No LLM call. Use --verbose for file/script details.",
+			"Move this session to another cwd by replacing old path strings, write lineage evidence, and switch Pi into the moved session copy. No LLM call. Use --verbose for file/script details.",
 		handler: async (args, ctx) => {
 			const { target, force, diverge, launch, shutdown, verbose } = parseArgs(args);
 			if (!target) {
@@ -1041,7 +1041,7 @@ export default function (pi: ExtensionAPI) {
 			const sessionFile = ctx.sessionManager.getSessionFile();
 			const sessionId = ctx.sessionManager.getSessionId();
 			if (!sessionFile) {
-				ctx.ui.notify("Cannot relocate an ephemeral session with no session file.", "error");
+				ctx.ui.notify("Cannot move an ephemeral session with no session file.", "error");
 				return;
 			}
 
@@ -1066,7 +1066,7 @@ export default function (pi: ExtensionAPI) {
 					"Move session?",
 					[
 						"This will write a moved session JSONL copy and replace path strings.",
-						"It will not switch the live Pi process.",
+						"It will switch the live Pi process into the moved copy.",
 						"",
 						`From: ${oldCwd}`,
 						`To:   ${targetCwd}`,
@@ -1078,7 +1078,7 @@ export default function (pi: ExtensionAPI) {
 
 			const original = await readFile(sessionFile, "utf8").catch((error) => {
 				if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-					throw new Error(["Current Pi session file is missing; cannot relocate this live process.", "", `Missing: ${sessionFile}`, "", "Try /session, /session-lineage --files, or start a fresh Pi session in the target directory."].join("\n"));
+					throw new Error(["Current Pi session file is missing; cannot move this live process.", "", `Missing: ${sessionFile}`, "", "Try /session, /session-lineage --files, or start a fresh Pi session in the target directory."].join("\n"));
 				}
 				throw error;
 			});
@@ -1133,17 +1133,20 @@ export default function (pi: ExtensionAPI) {
 			if (launch) {
 				try {
 					await launchInTerminal(restart.latestFile);
-					if (shutdown) await ctx.shutdown?.();
+					if (shutdown) launchWarning = "Ignored --shutdown because /move switches this Pi process into the moved session copy.";
 				} catch (error) {
 					launchWarning = `Terminal launch failed: ${error instanceof Error ? error.message : String(error)}`;
 				}
 			}
 			const command = `bash ${shellQuote(restart.latestFile)}`;
+			const fallbackLines = ["Fallback restart command:", ...restartCommandBlock(targetCwd)];
 			const lines = verbose ? [
 				`Moved session written with ${replacements} path-string rewrite${replacements === 1 ? "" : "s"}:`,
 				destinationFile,
 				"",
-				...restartCommandBlock(restart.targetCwd),
+				"Switching live Pi session to moved copy.",
+				"",
+				...fallbackLines,
 				"",
 				"Restart script still written for convenience:",
 				restart.scriptFile,
@@ -1152,17 +1155,29 @@ export default function (pi: ExtensionAPI) {
 				"",
 				`mode: ${diverge ? "diverge" : "move"}`,
 				...(name ? [`session name: ${name}`] : []),
-				...(launch ? ["", launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []),
+				...(launch ? ["", launchWarning ? launchWarning : "Launched in Terminal.app."] : []),
 				...(storeWarning ? ["", storeWarning] : []),
 			] : [
 				`Moved → ${targetCwd}`,
-				"",
-				...restartCommandBlock(targetCwd),
+				"Switching live Pi session to moved copy.",
 				"",
 				[`mode: ${diverge ? "diverge" : "move"}`, ...(name ? [`session name: ${name}`] : [])].join(" · "),
-				...(launch || storeWarning ? ["", ...(launch ? [launchWarning ? launchWarning : `Launched in Terminal.app${shutdown ? " and requested shutdown of this Pi process" : ""}.`] : []), ...(storeWarning ? [storeWarning] : [])] : []),
+				...(launch || storeWarning ? ["", ...(launch ? [launchWarning ? launchWarning : "Launched in Terminal.app."] : []), ...(storeWarning ? [storeWarning] : [])] : []),
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
+			const switchResult = await ctx.switchSession(destinationFile, {
+				withSession: async (nextCtx: any) => {
+					nextCtx.ui.notify([
+						"Moved session active",
+						"",
+						`Current cwd: ${targetCwd}`,
+						`Session file: ${shortPath(destinationFile)}`,
+						...(storeWarning ? ["", storeWarning] : []),
+						...(launchWarning ? ["", launchWarning] : []),
+					].join("\n"), "info");
+				},
+			});
+			if (switchResult?.cancelled) ctx.ui.notify(["Session move switch cancelled", "", ...fallbackLines].join("\n"), "warning");
 		},
 	});
 
