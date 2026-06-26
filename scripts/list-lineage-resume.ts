@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { join } from "node:path";
 import { SessionManager, type SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
@@ -23,6 +23,7 @@ type LineageNameRecord = { type?: string; root?: string; name?: string; currentS
 type StoreExport = { sessionObservations?: StoreObservation[]; labels?: StoreLabel[] };
 type StoreObservation = { sessionId: string; path: string; lineCount?: number; fileMtime?: string; metadata?: { cwd?: string; displayName?: string } };
 type StoreLabel = { targetType?: string; targetId?: string; labelType?: string; value?: string; confidence?: string };
+type SessionInfoRecord = { type?: string; name?: string; timestamp?: string };
 type ResumeSessionInfo = { path: string; messages: number; mtimeMs: number; cwd?: string };
 type LineageRow = { name: string; best: ResumeSessionInfo; count: number; totalMessages: number };
 
@@ -40,6 +41,32 @@ async function readJson<T>(path: string): Promise<T | undefined> {
 	} catch {
 		return undefined;
 	}
+}
+
+async function firstSessionInfoName(path: string): Promise<string | undefined> {
+	try {
+		for (const line of (await readFile(path, "utf8")).split(/\r?\n/)) {
+			if (!line.includes('"session_info"') || !line.includes('"name"')) continue;
+			const record = JSON.parse(line) as SessionInfoRecord;
+			if (record.type === "session_info" && record.name) return record.name;
+		}
+	} catch {}
+	return undefined;
+}
+
+async function restartScriptNames(): Promise<Map<string, string>> {
+	const dir = join(agentDir, "session-move", "restart-scripts");
+	const bySession = new Map<string, string>();
+	try {
+		for (const entry of await readdir(dir)) {
+			if (!entry.endsWith(".sh")) continue;
+			const text = await readFile(join(dir, entry), "utf8");
+			const name = text.match(/--name '([^']+)'/)?.[1] ?? text.match(/--name\s+"([^"]+)"/)?.[1];
+			const session = text.match(/--session '([^']+)'/)?.[1] ?? text.match(/--session\s+"([^"]+)"/)?.[1];
+			if (name && session) bySession.set(session, name);
+		}
+	} catch {}
+	return bySession;
 }
 
 function uniq<T>(items: T[]): T[] {
@@ -155,6 +182,7 @@ async function main() {
 		if (record.destinationSession) parentBySession.set(record.destinationSession, record.sourceSession ?? record.parent ?? "");
 	}
 	const store = await readJson<StoreExport>(join(agentDir, "session-store", "session-store.export.json"));
+	const restartNameByPath = await restartScriptNames();
 	const storeNameByPath = new Map<string, string>();
 	const storeSessionIdByPath = new Map<string, string>();
 	for (const observation of store?.sessionObservations ?? []) {
@@ -176,7 +204,12 @@ async function main() {
 		if (cwd) cwdBySession.set(path, cwd);
 		if (displayName) storeNameByPath.set(path, displayName);
 	}
+	for (const [path, name] of restartNameByPath) storeNameByPath.set(path, name);
 	const piSessions = await SessionManager.listAll();
+	await Promise.all(piSessions.filter((session) => restartNameByPath.has(session.path) && !storeNameByPath.has(session.path)).map(async (session) => {
+		const sessionInfoName = await firstSessionInfoName(session.path);
+		if (sessionInfoName) storeNameByPath.set(session.path, sessionInfoName);
+	}));
 	const piSessionByPath = new Map(piSessions.map((session) => [session.path, toResumeSessionInfo(session, cwdBySession)]));
 	for (const observation of store?.sessionObservations ?? []) {
 		const mtimeMs = Date.parse(observation.fileMtime ?? "");
@@ -190,14 +223,16 @@ async function main() {
 		piSessionByPath.set(observation.path, info);
 	}
 	const rows: LineageRow[] = [];
-	for (const lineage of latestByName.values()) {
-		const anchor = lineage.currentSession ?? lineage.root!;
-		const storeNamedPaths = [...storeNameByPath.entries()].filter(([, name]) => name === lineage.name).map(([path]) => path);
-		const paths = uniq([...descendants(anchor, records), anchor, ...storeNamedPaths].filter(Boolean))
-			.filter((path) => storeNameByPath.get(path) === lineage.name || nearestName(path, parentBySession, nameByAnchor) === lineage.name);
+	const allNames = [...new Set([...latestByName.keys(), ...restartNameByPath.values()])].sort((a, b) => a.localeCompare(b));
+	for (const name of allNames) {
+		const lineage = latestByName.get(name);
+		const anchor = lineage?.currentSession ?? lineage?.root;
+		const storeNamedPaths = [...storeNameByPath.entries()].filter(([, pathName]) => pathName === name).map(([path]) => path);
+		const paths = uniq([...(anchor ? descendants(anchor, records) : []), anchor, ...storeNamedPaths].filter(Boolean) as string[])
+			.filter((path) => storeNameByPath.get(path) === name || nearestName(path, parentBySession, nameByAnchor) === name);
 		const infos = paths.map((path) => piSessionByPath.get(path)).filter(Boolean) as ResumeSessionInfo[];
 		const best = infos.sort((a, b) => b.messages - a.messages || b.mtimeMs - a.mtimeMs)[0];
-		if (best) rows.push({ name: lineage.name!, best, count: infos.length, totalMessages: best.messages });
+		if (best) rows.push({ name, best, count: infos.length, totalMessages: best.messages });
 	}
 	rows.sort((a, b) => b.totalMessages - a.totalMessages || b.best.mtimeMs - a.best.mtimeMs);
 	const selected = Number(args.find((arg) => /^\d+$/.test(arg)) ?? 0);
