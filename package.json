@@ -1,6 +1,6 @@
 {
   "name": "pi-session-move",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": false,
   "description": "Move the current Pi session context to another working directory without invoking the LLM.",
   "type": "module",
