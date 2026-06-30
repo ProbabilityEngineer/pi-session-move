@@ -28,8 +28,23 @@ function expandLeadingTilde(value) {
     }
     return value;
 }
+function collapseDuplicatedHomePrefix(value) {
+    const home = process.env.HOME;
+    if (!home)
+        return value;
+    const slashValue = value.replace(/\\/g, "/");
+    const slashHome = home.replace(/\\/g, "/").replace(/\/+$/g, "");
+    const relHome = slashHome.replace(/^\/+/, "");
+    const doubled = `${slashHome}/${relHome}`.toLowerCase();
+    const lower = slashValue.toLowerCase();
+    if (lower === doubled)
+        return slashHome;
+    if (lower.startsWith(`${doubled}/`))
+        return `${slashHome}${slashValue.slice(doubled.length)}`;
+    return value;
+}
 function normalizeDir(value) {
-    return resolve(expandLeadingTilde(normalizeDraggedPath(value)));
+    return resolve(collapseDuplicatedHomePrefix(expandLeadingTilde(normalizeDraggedPath(value))));
 }
 function normalizeDirArg(value, baseCwd) {
     const normalized = expandLeadingTilde(normalizeDraggedPath(value));
@@ -613,9 +628,7 @@ async function sessionFilesInBucket(cwd) {
 }
 async function relocateSessionFile(sourceFile, oldCwd, targetCwd, mode, batchId, name) {
     const original = await readFile(sourceFile, "utf8");
-    let relocated = replaceAllLiteral(original, oldCwd, targetCwd);
-    relocated = replaceAllLiteral(relocated, oldCwd.replace(/\//g, "\\/"), targetCwd.replace(/\//g, "\\/"));
-    const replacements = original === relocated ? 0 : original.split(oldCwd).length - 1;
+    const { text: relocated, replacements } = replaceCwdAliases(original, [oldCwd, normalizeDir(oldCwd)], targetCwd);
     const destinationDir = join(defaultAgentDir(), "sessions", sessionBucketName(targetCwd));
     await mkdir(destinationDir, { recursive: true });
     const destinationFile = join(destinationDir, uniqueRelocatedName(sourceFile));
@@ -649,6 +662,20 @@ async function findRelocatedSessions(root = join(defaultAgentDir(), "sessions"))
 }
 function replaceAllLiteral(input, from, to) {
     return input.split(from).join(to);
+}
+function replaceCwdAliases(input, aliases, targetCwd) {
+    let text = input;
+    let replacements = 0;
+    for (const alias of [...new Set(aliases.filter(Boolean))]) {
+        if (!alias || alias === targetCwd)
+            continue;
+        const before = text;
+        text = replaceAllLiteral(text, alias, targetCwd);
+        text = replaceAllLiteral(text, alias.replace(/\//g, "\\/"), targetCwd.replace(/\//g, "\\/"));
+        if (before !== text)
+            replacements += before.split(alias).length - 1;
+    }
+    return { text, replacements };
 }
 function parseWords(args) {
     const words = [];
@@ -1059,10 +1086,8 @@ export default function (pi) {
                 }
                 throw error;
             });
-            let relocated = replaceAllLiteral(original, oldCwd, targetCwd);
-            // Handle rare JSON produced with escaped slashes.
-            relocated = replaceAllLiteral(relocated, oldCwd.replace(/\//g, "\\/"), targetCwd.replace(/\//g, "\\/"));
-            const replacements = original === relocated ? 0 : original.split(oldCwd).length - 1;
+            const storedCwd = ctx.sessionManager.getCwd();
+            const { text: relocated, replacements } = replaceCwdAliases(original, [oldCwd, storedCwd, storedCwd ? normalizeDir(storedCwd) : ""], targetCwd);
             const agentDir = defaultAgentDir();
             const destinationDir = join(agentDir, "sessions", sessionBucketName(targetCwd));
             await mkdir(destinationDir, { recursive: true });

@@ -1,6 +1,6 @@
 {
   "name": "pi-session-move",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": false,
   "description": "Move the current Pi session context to another working directory without invoking the LLM.",
   "type": "module",
@@ -38,6 +38,8 @@
     "lineages": "tsx scripts/list-lineage-resume.ts",
     "migrate-paths": "tsx scripts/migrate-session-move-paths.ts",
     "migrate-paths:move": "tsx scripts/migrate-session-move-paths.ts --move",
+    "repair-session-cwds": "tsx scripts/repair-session-cwds.ts",
+    "repair-session-cwds:write": "tsx scripts/repair-session-cwds.ts --write",
     "build": "tsc --project tsconfig.json",
     "lint": "tsc --noEmit"
   },

@@ -278,6 +278,28 @@ Move mode removes each source file only after the destination exists and its che
 ~/.pi/agent/session-move/migration-manifest.jsonl
 ```
 
+## Repair duplicated cwd paths
+
+If older moved sessions contain a duplicated home-prefix cwd such as:
+
+```text
+/Users/sam/users/sam/git/...
+```
+
+preview the repairs with:
+
+```bash
+npm run repair-session-cwds
+```
+
+and apply them with:
+
+```bash
+npm run repair-session-cwds:write
+```
+
+This normalizes duplicated home-prefix paths inside session JSONL files, move manifests, and restart scripts, and moves session files into the corrected cwd bucket when needed.
+
 ## Boundaries
 
 - `pi-session-move`: current session moves, restart guidance, lineage naming, and prune.
