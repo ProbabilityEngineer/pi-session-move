@@ -97,6 +97,7 @@ This is not a user slash command. User-facing actions are `/move`, `/lineage-nam
 - Use `pi-repo-move`'s `/repo-move <target>` to move the current repo directory on disk and preserve its session history.
 - Use `/lineage-name <name>` to pin a durable name for the current lineage branch.
 - Use `/move-prune --dry-run` to preview cleanup of superseded source session files.
+- If the current session JSONL file was removed but the live Pi process still has the session in memory, `/move` falls back to the live in-memory snapshot and warns instead of failing immediately.
 
 Use `pi-session-graph`'s `/session-status` and `/session-lineage` for read-only session status/lineage. Store rebuild/export/report workflows belong in the `agent-session-store` CLI, not this extension.
 
@@ -229,7 +230,7 @@ From the source checkout, the equivalent npm script is:
 npm run lineages
 ```
 
-The output shows one compact row per lineage with Pi's own resume message count, age, and resume cwd, then prompts for a row number and launches `pi --session` in that cwd. Use `--files` to include full session paths.
+The output shows one compact row per lineage/name with Pi's own resume message count, age, and resume cwd, then prompts for a row number and launches `pi --session` in that cwd. `pil` prefers the deepest accumulated continuation (highest message count, breaking ties by newer file time), not wall-clock latest. Session `/name` labels are also used to strengthen grouping alongside `/lineage-name`. Use `--files` to include full session paths.
 
 To print shell commands instead of launching Pi:
 

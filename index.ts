@@ -65,6 +65,13 @@ function defaultAgentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? ".", ".pi", "agent");
 }
 
+function serializeLiveSessionSnapshot(ctx: any): string | undefined {
+	const header = ctx.sessionManager?.getHeader?.();
+	const entries = ctx.sessionManager?.getEntries?.();
+	if (!header || !Array.isArray(entries) || entries.length === 0) return undefined;
+	return `${[header, ...entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+}
+
 type ParsedSessionFilename = { baseTimestamp?: string; providerSessionId?: string; relocatedTimestamp?: string; relocatedCwdSlug?: string; isRelocated: boolean };
 
 function parseSessionFilename(path: string): ParsedSessionFilename {
@@ -1102,6 +1109,11 @@ export default function (pi: ExtensionAPI) {
 
 			const original = await readFile(sessionFile, "utf8").catch((error) => {
 				if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+					const snapshot = serializeLiveSessionSnapshot(ctx);
+					if (snapshot) {
+						ctx.ui.notify(["Current Pi session file is missing; using the live in-memory session snapshot instead.", "", `Missing: ${sessionFile}`].join("\n"), "warning");
+						return snapshot;
+					}
 					throw new Error(["Current Pi session file is missing; cannot move this live process.", "", `Missing: ${sessionFile}`, "", "Try /session, /session-lineage --files, or start a fresh Pi session in the target directory."].join("\n"));
 				}
 				throw error;

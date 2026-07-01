@@ -43,13 +43,16 @@ async function readJson<T>(path: string): Promise<T | undefined> {
 	}
 }
 
-async function firstSessionInfoName(path: string): Promise<string | undefined> {
+async function latestSessionInfoName(path: string): Promise<string | undefined> {
 	try {
+		let latest: { name: string; timestamp?: string } | undefined;
 		for (const line of (await readFile(path, "utf8")).split(/\r?\n/)) {
 			if (!line.includes('"session_info"') || !line.includes('"name"')) continue;
 			const record = JSON.parse(line) as SessionInfoRecord;
-			if (record.type === "session_info" && record.name) return record.name;
+			if (record.type !== "session_info" || !record.name) continue;
+			if (!latest || String(record.timestamp ?? "") >= String(latest.timestamp ?? "")) latest = { name: record.name, timestamp: record.timestamp };
 		}
+		return latest?.name;
 	} catch {}
 	return undefined;
 }
@@ -206,8 +209,8 @@ async function main() {
 	}
 	for (const [path, name] of restartNameByPath) storeNameByPath.set(path, name);
 	const piSessions = await SessionManager.listAll();
-	await Promise.all(piSessions.filter((session) => restartNameByPath.has(session.path) && !storeNameByPath.has(session.path)).map(async (session) => {
-		const sessionInfoName = await firstSessionInfoName(session.path);
+	await Promise.all(piSessions.filter((session) => !storeNameByPath.has(session.path)).map(async (session) => {
+		const sessionInfoName = await latestSessionInfoName(session.path);
 		if (sessionInfoName) storeNameByPath.set(session.path, sessionInfoName);
 	}));
 	const piSessionByPath = new Map(piSessions.map((session) => [session.path, toResumeSessionInfo(session, cwdBySession)]));
@@ -222,8 +225,11 @@ async function main() {
 		};
 		piSessionByPath.set(observation.path, info);
 	}
+	for (const [path, name] of storeNameByPath) {
+		if (!nameByAnchor.has(path)) nameByAnchor.set(path, name);
+	}
 	const rows: LineageRow[] = [];
-	const allNames = [...new Set([...latestByName.keys(), ...restartNameByPath.values()])].sort((a, b) => a.localeCompare(b));
+	const allNames = [...new Set([...latestByName.keys(), ...restartNameByPath.values(), ...storeNameByPath.values()])].sort((a, b) => a.localeCompare(b));
 	for (const name of allNames) {
 		const lineage = latestByName.get(name);
 		const anchor = lineage?.currentSession ?? lineage?.root;
