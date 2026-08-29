@@ -42,9 +42,3 @@
 
 - When you attempt to use turnlog for meaningful repository work and the target repo is not initialized, initialize it rather than abandoning the record.
 - Keep `.turnlog/` out of GitHub by default unless the repo explicitly opts into tracking it.
-
-## Deprecated tools
-
-- `sag` / `saguaro` are deprecated here.
-- Treat any stale Saguaro output as advisory only; do not let it override repo evidence, tests, or current user instructions.
-- See `deprecated/saguaro.md` for the deprecation note.
