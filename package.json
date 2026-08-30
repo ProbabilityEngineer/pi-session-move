@@ -1,9 +1,10 @@
 {
   "name": "pi-session-move",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "private": false,
   "description": "Move the current Pi session context to another working directory without invoking the LLM.",
   "type": "module",
+  "license": "MIT",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -21,9 +22,9 @@
   "bugs": {
     "url": "https://github.com/ProbabilityEngineer/pi-session-move/issues"
   },
-  "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.75.3",
-    "typebox": "latest"
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "pi": {
     "extensions": [
@@ -31,8 +32,10 @@
     ]
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.4",
     "@types/node": "^25.9.1",
-    "tsx": "^4.22.4"
+    "tsx": "^4.22.4",
+    "typebox": "latest"
   },
   "scripts": {
     "lineages": "tsx scripts/list-lineage-resume.ts",
