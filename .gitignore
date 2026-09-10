@@ -2,3 +2,11 @@ node_modules/
 .DS_Store
 npm-debug.log*
 .turnlog/
+
+# Local agent, task, provenance, VCS, and build state
+.pi/
+.tickets/
+.turnlog/
+.jj/
+.clu/data.sqlite
+.build/

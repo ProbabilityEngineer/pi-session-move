@@ -1,0 +1,34 @@
+# Example workflow. Copy this file and edit to fit your process.
+# Instantiate with:
+#   clu run example --var scope=auth-fix
+# Inspect without running:
+#   clu template show example
+
+name: example
+description: |
+  Three-step workflow: investigate → implement → review.
+  Review is pre-assigned to the 'code-reviewer' agent lane.
+
+vars:
+  scope:
+    description: "Short tag for this run (used in titles, e.g. 'auth-fix')."
+    required: true
+
+steps:
+  - id: investigate
+    title: "Investigate: {{scope}}"
+    type: task
+    priority: 2
+
+  - id: implement
+    title: "Implement: {{scope}}"
+    type: task
+    priority: 1
+    needs: [investigate]
+
+  - id: review
+    title: "Review: {{scope}}"
+    type: task
+    priority: 1
+    agent: code-reviewer
+    needs: [implement]

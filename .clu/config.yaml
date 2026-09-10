@@ -1,0 +1,63 @@
+# clu project configuration.
+#
+# Committed to git alongside workflow templates. Local-only state
+# (the SQLite database, WAL files) lives in this same directory but
+# is gitignored.
+
+# Prefix for newly-allocated issue IDs. Existing IDs are unaffected
+# if you change this. Lowercase a-z + digits + dashes, ending with
+# "-". Max 16 chars. Example: "acme-" → acme-a3f8.
+id_prefix: clu-
+
+# Declared agents (Claude Code sessions or other clu-aware processes).
+# Each name is the value to pass to `clu claim --agent <name>`; capabilities
+# are the cap:* labels they'll match for unassigned-lane work.
+#
+# Coordinators run `clu agent ls` to see who exists and who's currently
+# live (heartbeating from a --wait/--watch loop).
+#
+# Uncomment + edit to define your team:
+#
+# agents:
+#   code-reviewer:
+#     description: "Reviews Go code for correctness and security"
+#     capabilities: [go-review, security-review]
+#     # Launch with: clu agent start code-reviewer
+#     # command is the executable; prompts are files under
+#     # .clu/agents/code-reviewer/ passed to it (claude defaults
+#     # prompt_flag to --append-system-prompt). Omit prompts to use every
+#     # *.md in that folder. Run with --print to see the command first.
+#     #
+#     # Shared base: any *.md in .clu/agents/_shared/ is prepended to
+#     # every agent (e.g. a common AGENTS.md / AUTONOMY.md) so the shared
+#     # contract lives in one place. Per-agent prompts come after it.
+#     #
+#     # startup_prompt (optional) is the agent's first message, passed as
+#     # a trailing positional. Use it for startup steps the agent runs
+#     # itself, e.g.:
+#     #   startup_prompt: |
+#     #     Check your inbox (clu inbox -a code-reviewer), then claim work.
+#     command: claude
+#     prompts: [AGENTS.md, SOUL.md]
+#   doc-writer:
+#     description: "Writes README + docs/ updates"
+#     capabilities: [docs]
+
+# Bootstrap recipe for new git worktrees. Run via
+#   clu worktree add <path> [<ref>] --bootstrap
+#   clu worktree bootstrap <path>
+#
+# Files in `copy` are pulled from the main worktree (auto-detected via
+# git) into the same relative path inside the new worktree — for
+# gitignored secrets / .env / install state that fresh checkouts lack.
+# Commands run inside the new worktree, fail-fast on the first non-zero
+# exit.
+#
+# worktree:
+#   dir: .worktrees       # where bare-name worktrees land (default)
+#   copy:
+#     - .env
+#     - apps/api/.env
+#   commands:
+#     - pnpm install
+#     - pnpm db:migrate
